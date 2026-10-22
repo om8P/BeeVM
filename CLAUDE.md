@@ -34,4 +34,12 @@ BeeVM is a Function-as-a-Service runtime: it runs user functions inside Firecrac
 - Integration tests that need KVM use the build tag `//go:build kvm`.
 
 ## Commands
-(Fill in as they come to exist.)
+Run everything from a **WSL terminal** inside this folder (`/mnt/c/Users/ommga/Desktop/ACC/BeeVM`). Source code stays on Windows; big files (kernel, rootfs, snapshots, run folders) live in `$BEEVM_HOME` (default `~/.beevm`) on the fast WSL disk.
+
+- `make setup`: one-time, re-runnable install of Go, Firecracker, kernel and rootfs (asks for sudo).
+- `make images`: rebuild kernel and rootfs only (no sudo).
+- `make boot`: boot a MicroVM and get a shell (`reboot -f` to exit).
+- `make boot-test`: boot automatically, check it worked, print boot time.
+- `make clean-images`: delete images and run folders.
+
+(Add more as they come to exist.)

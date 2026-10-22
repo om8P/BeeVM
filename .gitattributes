@@ -1,0 +1,3 @@
+# Always use LF so shell scripts run in WSL/bash even when edited on Windows.
+* text=auto eol=lf
+*.docx binary

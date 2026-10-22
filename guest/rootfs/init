@@ -1,0 +1,21 @@
+#!/bin/sh
+# BeeVM guest PID 1. The kernel runs this first (init=/sbin/beevm-init).
+export PATH=/sbin:/bin:/usr/sbin:/usr/bin
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev 2>/dev/null
+
+echo "================ BeeVM guest ================"
+echo "kernel : $(uname -sr)"
+echo "cpus   : $(grep -c ^processor /proc/cpuinfo)"
+echo "memory : $(grep MemTotal /proc/meminfo)"
+echo "============================================="
+
+if grep -q 'beevm.selftest=1' /proc/cmdline; then
+  echo "BEEVM_BOOT_OK"
+  reboot -f
+fi
+
+echo "Type 'reboot -f' to stop the VM."
+# setsid + cttyhack gives the shell a proper controlling terminal (Ctrl-C works).
+exec setsid cttyhack /bin/sh

@@ -7,7 +7,7 @@ Details of each milestone: `docs/milestones.md`.
 
 | # | Milestone | Status |
 |---|-----------|--------|
-| 1 | Environment and a hand-booted MicroVM | Not started |
+| 1 | Environment and a hand-booted MicroVM | Done, needs refinement (boot ~1.8 s under WSL2; no `kvm` test yet) |
 | 2 | Boot and stop a VM from Go | Not started |
 | 3 | Guest agent over vsock, first function runs | Not started |
 | 4 | HTTP API, registry and CLI | Not started |
@@ -32,3 +32,12 @@ Status values: Not started · In progress · Done · Done, needs refinement (say
 - Checked the laptop: WSL2 Ubuntu 24.04 with `/dev/kvm` available.
 - Set up CLAUDE.md, git, and `docs/milestones.md` (13 session-sized milestones).
 - **Next:** milestone 1.
+
+### 2026-10-22: Milestone 1
+- Added `make setup / images / boot / boot-test / clean-images` (run from WSL). Big files live in `~/.beevm` (`BEEVM_HOME`); source stays on Windows.
+- Pinned: Firecracker 1.17.0, Go 1.27.3, Alpine 3.24.3 minirootfs, kernel `vmlinux-6.1.155` (taken from the Firecracker CI v1.15 bucket; v1.17 CI has no 6.1 kernel). All checksum-verified.
+- Rootfs is built without Docker or sudo (`fakeroot` + `mkfs.ext4 -d`). Guest init is `guest/rootfs/init`.
+- `.gitattributes` forces LF line endings (Windows git had `autocrlf=true`, which breaks shell scripts).
+- Verified: `make boot-test` passes; `make setup` re-runs in under 1 s; `make clean-images && make setup && make boot-test` passes from scratch.
+- **Baseline boot time (full cold boot, 1 vCPU, 128 MiB, nested KVM in WSL2): ~1.7-2.0 s** from process start to exit, kernel reaches init at ~1.3 s. Far above 50 ms, as expected: snapshot restore (M6) is what fixes this. Worth checking whether the slow kernel boot is WSL2 nested virtualization or boot args.
+- **Next:** milestone 2 (boot and stop a VM from Go).
