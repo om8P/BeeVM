@@ -8,7 +8,7 @@ Details of each milestone: `docs/milestones.md`.
 | # | Milestone | Status |
 |---|-----------|--------|
 | 1 | Environment and a hand-booted MicroVM | Done, needs refinement (boot ~1.8 s under WSL2; no `kvm` test yet) |
-| 2 | Boot and stop a VM from Go | Not started |
+| 2 | Boot and stop a VM from Go | Done |
 | 3 | Guest agent over vsock, first function runs | Not started |
 | 4 | HTTP API, registry and CLI | Not started |
 | 5 | Artifact store with MinIO/S3 | Not started |
@@ -41,3 +41,14 @@ Status values: Not started · In progress · Done · Done, needs refinement (say
 - Verified: `make boot-test` passes; `make setup` re-runs in under 1 s; `make clean-images && make setup && make boot-test` passes from scratch.
 - **Baseline boot time (full cold boot, 1 vCPU, 128 MiB, nested KVM in WSL2): ~1.7-2.0 s** from process start to exit, kernel reaches init at ~1.3 s. Far above 50 ms, as expected: snapshot restore (M6) is what fixes this. Worth checking whether the slow kernel boot is WSL2 nested virtualization or boot args.
 - **Next:** milestone 2 (boot and stop a VM from Go).
+
+### 2026-10-23: Milestone 2
+- Added Go module `github.com/OmMhatre-99/beevm` and `internal/vmm` (config, VM lifecycle: New, Start, WaitForConsole, Stop, Kill, Cleanup) on top of `firecracker-go-sdk` (main-branch commit `6fb280e993d4`; its tests target Firecracker 1.4.1 but it works with our 1.17.0).
+- `cmd/beevmd boot` boots one VM, tails the console, stops it gracefully and cleans up. Ctrl-C kills the VM and exits 130.
+- Guest init now has modes via `beevm.mode=` (`selftest`, `idle`, none = shell). `idle` prints `BEEVM_READY`. The old `beevm.selftest=1` flag was renamed.
+- Makefile: `build`, `test`, `test-kvm`, `vet`.
+- Verified: 12 unit tests and 3 KVM tests pass; no leftover `firecracker` process or VM folder after normal run, Ctrl-C, missing-images error, and `--keep-logs` (keeps only `console.log`). `make boot-test` from M1 still passes.
+- Numbers (WSL2, 1 vCPU, 128 MiB): ready in ~1.6-1.7 s after Start; graceful stop (Ctrl-Alt-Del) 55-90 ms.
+- Learned: `SendCtrlAltDel` makes the guest kernel restart directly (default behaviour), so init's SIGINT trap never runs; that is fine. `Machine.Shutdown` may only be called once (closes a channel), so `Stop` guards it with `sync.Once`. SDK `Start` must get a long-lived context, not the caller's timeout context.
+- Boot-time hint for M6: in the kernel log there is a ~460 ms gap around "clk: Disabling unused clocks" before the i8042 line; worth investigating when tuning.
+- **Next:** milestone 3 (guest agent over vsock).

@@ -1,21 +1,35 @@
 #!/bin/sh
 # BeeVM guest PID 1. The kernel runs this first (init=/sbin/beevm-init).
+# Mode comes from the kernel command line:  beevm.mode=selftest | idle | (none = shell)
 export PATH=/sbin:/bin:/usr/sbin:/usr/bin
 mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev 2>/dev/null
 
+MODE=$(sed -n 's/.*beevm\.mode=\([a-z]*\).*/\1/p' /proc/cmdline)
+
 echo "================ BeeVM guest ================"
 echo "kernel : $(uname -sr)"
 echo "cpus   : $(grep -c ^processor /proc/cpuinfo)"
 echo "memory : $(grep MemTotal /proc/meminfo)"
+echo "mode   : ${MODE:-shell}"
 echo "============================================="
 
-if grep -q 'beevm.selftest=1' /proc/cmdline; then
-  echo "BEEVM_BOOT_OK"
-  reboot -f
-fi
-
-echo "Type 'reboot -f' to stop the VM."
-# setsid + cttyhack gives the shell a proper controlling terminal (Ctrl-C works).
-exec setsid cttyhack /bin/sh
+case "$MODE" in
+  selftest)
+    echo "BEEVM_BOOT_OK"
+    reboot -f
+    ;;
+  idle)
+    # Ctrl-Alt-Del from the host arrives as SIGINT; SIGTERM is accepted too.
+    trap 'echo BEEVM_STOPPING; reboot -f' INT TERM
+    echo "BEEVM_READY"
+    # `wait` returns as soon as a trapped signal arrives (a plain sleep would not).
+    while true; do sleep 3600 & wait $!; done
+    ;;
+  *)
+    echo "Type 'reboot -f' to stop the VM."
+    # setsid + cttyhack gives the shell a proper controlling terminal (Ctrl-C works).
+    exec setsid cttyhack /bin/sh
+    ;;
+esac

@@ -15,3 +15,8 @@ web/dist/
 *.db
 .env
 bench/results/
+
+# Personal learning notes (not part of the project)
+docs/learning-notes.docx
+docs/learning-notes/
+~$*

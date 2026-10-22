@@ -1,14 +1,19 @@
 # Run all targets from a WSL terminal, inside this folder.
 BEEVM_HOME ?= $(HOME)/.beevm
 export BEEVM_HOME
+GO ?= /usr/local/go/bin/go
 
-.PHONY: help setup images kernel rootfs boot boot-test clean-images
+.PHONY: help setup images kernel rootfs boot boot-test clean-images build test test-kvm vet
 
 help:
 	@echo "make setup        one-time install (Go, Firecracker, kernel, rootfs); needs sudo"
 	@echo "make images       (re)build kernel + rootfs only"
-	@echo "make boot         boot a MicroVM and get a shell (type 'reboot -f' to exit)"
-	@echo "make boot-test    boot automatically, check it worked, print boot time"
+	@echo "make boot         boot a MicroVM with the shell script and get a shell (reboot -f to exit)"
+	@echo "make boot-test    boot with the shell script, check it worked, print boot time"
+	@echo "make build        build bin/beevmd"
+	@echo "make test         Go unit tests (no KVM needed)"
+	@echo "make test-kvm     Go tests that boot real MicroVMs (needs KVM)"
+	@echo "make vet          go vet"
 	@echo "make clean-images delete images and run folders in $(BEEVM_HOME)"
 
 setup:
@@ -25,6 +30,18 @@ boot:
 
 boot-test:
 	bash scripts/boot-vm.sh --selftest
+
+build:
+	$(GO) build -o bin/beevmd ./cmd/beevmd
+
+test:
+	$(GO) test ./...
+
+test-kvm:
+	$(GO) test -tags kvm -v -count=1 ./internal/vmm/
+
+vet:
+	$(GO) vet ./...
 
 clean-images:
 	rm -rf $(BEEVM_HOME)/images $(BEEVM_HOME)/run

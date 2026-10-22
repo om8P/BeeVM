@@ -18,7 +18,7 @@ mkdir -p "$RUN"
 cp --reflink=auto "$IMAGES_DIR/rootfs.ext4" "$RUN/rootfs.ext4"
 
 ARGS="console=ttyS0 reboot=k panic=1 pci=off init=/sbin/beevm-init"
-[ "$MODE" = "selftest" ] && ARGS="$ARGS beevm.selftest=1"
+[ "$MODE" = "selftest" ] && ARGS="$ARGS beevm.mode=selftest"
 
 cat > "$RUN/vm-config.json" <<JSON
 {

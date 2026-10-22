@@ -14,7 +14,7 @@ BeeVM is a Function-as-a-Service runtime: it runs user functions inside Firecrac
 - MicroVM density per node
 
 ## Decisions (do not change without asking)
-- Control plane in **Go** (1.23+), `firecracker-go-sdk`, `go-chi/chi`, SQLite via `modernc.org/sqlite`.
+- Control plane in **Go** (1.24+; installed 1.27.3), `firecracker-go-sdk` (pinned to a main-branch commit, see `go.mod`; last tag is from 2022), `go-chi/chi`, SQLite via `modernc.org/sqlite`.
 - Host ↔ guest communication over **vsock**, not the network.
 - **One network namespace per VM**, so restored snapshots can keep the same guest IP.
 - Snapshots live on **local NVMe**; S3/MinIO is only the source and backup.
@@ -41,5 +41,8 @@ Run everything from a **WSL terminal** inside this folder (`/mnt/c/Users/ommga/D
 - `make boot`: boot a MicroVM and get a shell (`reboot -f` to exit).
 - `make boot-test`: boot automatically, check it worked, print boot time.
 - `make clean-images`: delete images and run folders.
+- `make build`: build `bin/beevmd`. `./bin/beevmd boot [--hold 30s] [--keep-logs]`: boot one VM through the Go code, show console, stop, clean up.
+- `make test`: Go unit tests (no KVM). `make test-kvm`: tests that boot real VMs (`//go:build kvm`). `make vet`: go vet.
+- Calling `go` from Windows tools via `wsl.exe` mangles quotes and `$VARS`; put multi-line commands in a script file and run `wsl.exe -- bash <file>`, or use `make`.
 
 (Add more as they come to exist.)
