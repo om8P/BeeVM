@@ -5,6 +5,7 @@ BeeVM is a Function-as-a-Service runtime: it runs user functions inside Firecrac
 
 - Full design: `docs/architecture.md` (read it before starting a milestone).
 - Progress log: `docs/progress.md` (read it first; update it at the end of every session).
+- Milestone guide: `docs/milestones.md` (13 session-sized milestones; this supersedes the 9 milestones listed in the architecture doc).
 - Case study source: `Advanced Cloud System Software Design_ 30 Case Studies.docx`. Only group 06's title, summary and overview-table row are valid. Its detailed sections 1–5 are a copy-paste error about an HNSW vector engine — ignore them.
 
 ## Grading criteria (from the case study)
