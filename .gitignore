@@ -1,0 +1,17 @@
+# Go build output
+bin/
+*.exe
+
+# VM images and snapshots (large, rebuilt by scripts)
+*.ext4
+vmlinux*
+snapshots/
+
+# Node / dashboard
+node_modules/
+web/dist/
+
+# Local data
+*.db
+.env
+bench/results/
