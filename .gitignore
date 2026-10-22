@@ -16,11 +16,9 @@ web/dist/
 .env
 bench/results/
 
-# Personal learning notes (not part of the project)
-docs/learning-notes.docx
-docs/learning-notes/
+# Developer guide: only the documents are tracked, not the generator scripts
+developer-guide/tools/
 ~$*
 
 # Course material (kept locally, not published)
 Advanced Cloud System Software Design_ 30 Case Studies.docx
-docs/BeeVM-guide.docx
