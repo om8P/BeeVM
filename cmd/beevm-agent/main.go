@@ -19,8 +19,8 @@ import (
 
 	"github.com/mdlayher/vsock"
 
-	"github.com/OmMhatre-99/BeeVM/internal/agent"
-	"github.com/OmMhatre-99/BeeVM/internal/agentproto"
+	"github.com/om8P/BeeVM/internal/agent"
+	"github.com/om8P/BeeVM/internal/agentproto"
 )
 
 const version = "0.1.0"

@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/OmMhatre-99/BeeVM/internal/agentproto"
+	"github.com/om8P/BeeVM/internal/agentproto"
 )
 
 // dialVsock opens a connection to a port inside the guest.

@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/OmMhatre-99/BeeVM/internal/vmm"
+	"github.com/om8P/BeeVM/internal/vmm"
 )
 
 // runInvoke boots a VM with the guest agent, uploads a function binary, runs it one or more

@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/OmMhatre-99/BeeVM/internal/vmm"
+	"github.com/om8P/BeeVM/internal/vmm"
 )
 
 func main() {

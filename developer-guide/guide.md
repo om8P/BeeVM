@@ -87,7 +87,7 @@ In the **WSL terminal** (choose your own Windows folder):
 
 ```bash
 cd /mnt/c/Users/<you>/Desktop
-git clone https://github.com/OmMhatre-99/BeeVM.git
+git clone https://github.com/om8P/BeeVM.git
 cd BeeVM
 ```
 
@@ -277,7 +277,7 @@ make build         # downloads Go dependencies the first time, builds bin/beevmd
 For the record, the module was created with:
 
 ```bash
-go mod init github.com/OmMhatre-99/BeeVM
+go mod init github.com/om8P/BeeVM
 go get github.com/firecracker-microvm/firecracker-go-sdk@6fb280e993d4
 go mod tidy
 ```
@@ -396,13 +396,13 @@ What we did, so you can do the same for your own fork or a new repo.
 
 ```bash
 gh auth login                                   # once: log the GitHub CLI in
-gh repo create OmMhatre-99/beevm --public --source=. --remote=origin --push
-gh repo rename BeeVM --repo OmMhatre-99/beevm --yes
-git remote set-url origin https://github.com/OmMhatre-99/BeeVM.git
+gh repo create om8P/beevm --public --source=. --remote=origin --push
+gh repo rename BeeVM --repo om8P/beevm --yes
+git remote set-url origin https://github.com/om8P/BeeVM.git
 ```
 
 - `gh repo create ... --source=. --push` creates the repo on GitHub, adds it as `origin` and pushes the current branch.
-- After renaming the repo we also renamed the Go module to `github.com/OmMhatre-99/BeeVM` (in `go.mod` and the import in `cmd/beevmd/main.go`) so they match.
+- After renaming the repo we also renamed the Go module to `github.com/om8P/BeeVM` (in `go.mod` and the import in `cmd/beevmd/main.go`) so they match.
 
 ### 5.1 Removing a file from history before going public
 

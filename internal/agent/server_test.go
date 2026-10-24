@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/OmMhatre-99/BeeVM/internal/agentproto"
+	"github.com/om8P/BeeVM/internal/agentproto"
 )
 
 // testfnPath is the compiled examples/functions/testfn, built once for all tests.

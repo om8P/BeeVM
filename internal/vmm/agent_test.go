@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/OmMhatre-99/BeeVM/internal/agentproto"
+	"github.com/om8P/BeeVM/internal/agentproto"
 )
 
 // fakeFirecracker listens on a Unix socket like Firecracker's vsock bridge: it expects

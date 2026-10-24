@@ -43,7 +43,7 @@ Status values: Not started · In progress · Done · Done, needs refinement (say
 - **Next:** milestone 2 (boot and stop a VM from Go).
 
 ### 2026-10-23: Milestone 2
-- Added Go module `github.com/OmMhatre-99/BeeVM` and `internal/vmm` (config, VM lifecycle: New, Start, WaitForConsole, Stop, Kill, Cleanup) on top of `firecracker-go-sdk` (main-branch commit `6fb280e993d4`; its tests target Firecracker 1.4.1 but it works with our 1.17.0).
+- Added Go module `github.com/om8P/BeeVM` and `internal/vmm` (config, VM lifecycle: New, Start, WaitForConsole, Stop, Kill, Cleanup) on top of `firecracker-go-sdk` (main-branch commit `6fb280e993d4`; its tests target Firecracker 1.4.1 but it works with our 1.17.0).
 - `cmd/beevmd boot` boots one VM, tails the console, stops it gracefully and cleans up. Ctrl-C kills the VM and exits 130.
 - Guest init now has modes via `beevm.mode=` (`selftest`, `idle`, none = shell). `idle` prints `BEEVM_READY`. The old `beevm.selftest=1` flag was renamed.
 - Makefile: `build`, `test`, `test-kvm`, `vet`.

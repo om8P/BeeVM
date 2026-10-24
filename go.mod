@@ -1,4 +1,4 @@
-module github.com/OmMhatre-99/BeeVM
+module github.com/om8P/BeeVM
 
 go 1.25.0
 

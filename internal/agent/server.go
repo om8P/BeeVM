@@ -24,7 +24,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/OmMhatre-99/BeeVM/internal/agentproto"
+	"github.com/om8P/BeeVM/internal/agentproto"
 )
 
 // Server serves the agent protocol.
