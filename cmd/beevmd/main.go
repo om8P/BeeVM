@@ -25,6 +25,8 @@ func main() {
 	switch os.Args[1] {
 	case "boot":
 		os.Exit(runBoot(os.Args[2:]))
+	case "invoke":
+		os.Exit(runInvoke(os.Args[2:]))
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -37,7 +39,21 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: beevmd <command> [flags]")
 	fmt.Fprintln(os.Stderr, "commands:")
-	fmt.Fprintln(os.Stderr, "  boot   start one MicroVM, show its console, stop it and clean up")
+	fmt.Fprintln(os.Stderr, "  boot     start one MicroVM, show its console, stop it and clean up")
+	fmt.Fprintln(os.Stderr, "  invoke   boot a VM, upload a function binary, run it (repeatedly), clean up")
+}
+
+// vmConfig builds the VM config shared by the subcommands.
+func vmConfig(home, bootArgs string, vcpus, mem int64) vmm.Config {
+	return vmm.Config{
+		BaseDir:        filepath.Join(home, "run", "vms"),
+		FirecrackerBin: filepath.Join(home, "bin", "firecracker"),
+		KernelPath:     filepath.Join(home, "images", "vmlinux"),
+		RootfsPath:     filepath.Join(home, "images", "rootfs.ext4"),
+		ExtraBootArgs:  bootArgs,
+		VCPUs:          vcpus,
+		MemMiB:         mem,
+	}
 }
 
 // beevmHome is where the binaries and images live (see scripts/common.sh).
@@ -62,15 +78,7 @@ func runBoot(args []string) int {
 	_ = fs.Parse(args)
 
 	home := beevmHome()
-	vm, err := vmm.New(vmm.Config{
-		BaseDir:        filepath.Join(home, "run", "vms"),
-		FirecrackerBin: filepath.Join(home, "bin", "firecracker"),
-		KernelPath:     filepath.Join(home, "images", "vmlinux"),
-		RootfsPath:     filepath.Join(home, "images", "rootfs.ext4"),
-		ExtraBootArgs:  "beevm.mode=idle",
-		VCPUs:          *vcpus,
-		MemMiB:         *mem,
-	})
+	vm, err := vmm.New(vmConfig(home, "beevm.mode=idle", *vcpus, *mem))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1

@@ -1,6 +1,6 @@
 #!/bin/sh
 # BeeVM guest PID 1. The kernel runs this first (init=/sbin/beevm-init).
-# Mode comes from the kernel command line:  beevm.mode=selftest | idle | (none = shell)
+# Mode comes from the kernel command line:  beevm.mode=selftest | idle | agent | (none = shell)
 export PATH=/sbin:/bin:/usr/sbin:/usr/bin
 mount -t proc proc /proc
 mount -t sysfs sys /sys
@@ -26,6 +26,17 @@ case "$MODE" in
     echo "BEEVM_READY"
     # `wait` returns as soon as a trapped signal arrives (a plain sleep would not).
     while true; do sleep 3600 & wait $!; done
+    ;;
+  agent)
+    # /run is RAM (tmpfs): the agent stores the uploaded function there, never on the disk image.
+    mount -t tmpfs tmpfs /run
+    /sbin/beevm-agent &
+    AGENT_PID=$!
+    echo "BEEVM_AGENT_STARTED"
+    wait $AGENT_PID
+    # A VM without its agent is useless: say why, then power off (the host sees the exit).
+    echo "BEEVM_AGENT_EXITED code=$?"
+    reboot -f
     ;;
   *)
     echo "Type 'reboot -f' to stop the VM."

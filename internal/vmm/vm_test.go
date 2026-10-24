@@ -50,6 +50,7 @@ func TestValidateRejectsBadConfig(t *testing.T) {
 		"slash in id":     func(c *Config) { c.ID = "a/b" },
 		"zero vcpus":      func(c *Config) { c.VCPUs = 0 },
 		"tiny memory":     func(c *Config) { c.MemMiB = 16 },
+		"reserved cid":    func(c *Config) { c.VsockCID = 2 },
 		"missing kernel":  func(c *Config) { c.KernelPath = "/nonexistent/vmlinux" },
 		"empty rootfs":    func(c *Config) { c.RootfsPath = "" },
 	}

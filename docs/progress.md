@@ -9,7 +9,7 @@ Details of each milestone: `docs/milestones.md`.
 |---|-----------|--------|
 | 1 | Environment and a hand-booted MicroVM | Done, needs refinement (boot ~1.8 s under WSL2; no `kvm` test yet) |
 | 2 | Boot and stop a VM from Go | Done |
-| 3 | Guest agent over vsock, first function runs | Not started |
+| 3 | Guest agent over vsock, first function runs | Done |
 | 4 | HTTP API, registry and CLI | Not started |
 | 5 | Artifact store with MinIO/S3 | Not started |
 | 6 | Snapshots and fast restore (the core) | Not started |
@@ -52,3 +52,15 @@ Status values: Not started · In progress · Done · Done, needs refinement (say
 - Learned: `SendCtrlAltDel` makes the guest kernel restart directly (default behaviour), so init's SIGINT trap never runs; that is fine. `Machine.Shutdown` may only be called once (closes a channel), so `Stop` guards it with `sync.Once`. SDK `Start` must get a long-lived context, not the caller's timeout context.
 - Boot-time hint for M6: in the kernel log there is a ~460 ms gap around "clk: Disabling unused clocks" before the i8042 line; worth investigating when tuning.
 - **Next:** milestone 3 (guest agent over vsock).
+
+### 2026-10-24: Milestone 3
+- Guest agent: `cmd/beevm-agent` (static Go binary, baked into the rootfs as `/sbin/beevm-agent`) serves HTTP+JSON over vsock port 10000: `GET /health`, `PUT /function` (raw binary, stored in tmpfs `/run/beevm/function`), `POST /invoke` (payload on stdin, JSON on stdout, logs on stderr). Server logic is in `internal/agent` (no vsock code, testable with a normal HTTP server); shared types in `internal/agentproto`.
+- Runner: each call runs in its own process group; a timeout kills the whole group; output limits (6 MB stdout, last 64 KB stderr); one call at a time per VM. Failures (exit code, timeout, bad JSON) come back as HTTP 200 with `error` set.
+- Host: `internal/vmm/agent.go` (`dialVsock` does Firecracker's `CONNECT <port>` / `OK` handshake on `v.sock`; `AgentClient` with Health, UploadFunction, Invoke; one kept-alive connection). `VM` gets a vsock device (CID 3), `Agent()` and `WaitForAgent()`.
+- Init has a new `beevm.mode=agent` (mounts tmpfs on /run, starts the agent, reboots the VM if the agent exits). `build-rootfs.sh` now builds the agent (CGO_ENABLED=0) and rebuilds the image when it changes.
+- New: `beevmd invoke`, `make examples`, examples `hello-go-binary` and `testfn`.
+- Verified: unit tests (agent 12, host client 6 with a fake Firecracker, plus the older ones) and KVM tests pass (20 correct echo calls, failing function, bad output, timeout then VM still works, hello example, invoke-before-upload gives 409). Nothing left behind after normal runs, timeout, failing function, Ctrl-C (exit 130) and `--keep-logs`. M1 `make boot-test` and M2 tests still pass.
+- Numbers (WSL2, 1 vCPU, 128 MiB): agent answers 1.64-1.85 s after Start (cold boot, unchanged from M2); upload of a 2.5 MB function ~75 ms; warm invoke round trip 4-4.5 ms (median), first call ~11 ms; graceful stop 56-85 ms. Agent binary 6.8 MB, rootfs 20 MB on disk.
+- Learned: `go get` for vsock also bumped `golang.org/x/*`; fine. Firecracker closes the connection when the guest port is not listening yet, so `WaitForAgent` just retries `/health` every 10 ms. Passing `$VARS` or `|` through `wsl.exe` still breaks: use script files or `make`.
+- Not done on purpose (later): zombie reaping of daemonized grandchildren, streaming large outputs, agent auth, reconnecting after a snapshot restore (M6).
+- **Next:** milestone 4 (HTTP API, registry and CLI).

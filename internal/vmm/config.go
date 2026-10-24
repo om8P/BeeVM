@@ -33,6 +33,7 @@ type Config struct {
 	ExtraBootArgs  string // appended to DefaultBootArgs, e.g. "beevm.mode=idle"
 	VCPUs          int64  // default 1
 	MemMiB         int64  // default 128
+	VsockCID       uint32 // the guest's vsock address; default 3 (0-2 are reserved, 2 is the host)
 }
 
 // applyDefaults fills empty fields. It returns a copy; the caller's Config is untouched.
@@ -49,6 +50,9 @@ func (c Config) applyDefaults() (Config, error) {
 	}
 	if c.MemMiB == 0 {
 		c.MemMiB = 128
+	}
+	if c.VsockCID == 0 {
+		c.VsockCID = 3
 	}
 	return c, nil
 }
@@ -67,6 +71,9 @@ func (c Config) Validate() error {
 	}
 	if c.MemMiB < 64 {
 		errs = append(errs, fmt.Errorf("MemMiB must be at least 64, got %d", c.MemMiB))
+	}
+	if c.VsockCID < 3 {
+		errs = append(errs, fmt.Errorf("VsockCID must be at least 3, got %d", c.VsockCID))
 	}
 	for name, p := range map[string]string{"FirecrackerBin": c.FirecrackerBin, "KernelPath": c.KernelPath, "RootfsPath": c.RootfsPath} {
 		if p == "" {
@@ -91,6 +98,9 @@ func (c Config) Dir() string { return filepath.Join(c.BaseDir, c.ID) }
 
 // SocketPath is Firecracker's API socket.
 func (c Config) SocketPath() string { return filepath.Join(c.Dir(), "firecracker.sock") }
+
+// VsockPath is the Unix socket through which the host reaches the guest's vsock ports.
+func (c Config) VsockPath() string { return filepath.Join(c.Dir(), "v.sock") }
 
 // ConsolePath is where guest serial output and Firecracker's own messages are written.
 func (c Config) ConsolePath() string { return filepath.Join(c.Dir(), "console.log") }

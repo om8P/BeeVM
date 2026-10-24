@@ -32,6 +32,8 @@ type VM struct {
 	console   *os.File
 	cancelVM  context.CancelFunc
 
+	agent *AgentClient // talks to the guest agent over vsock
+
 	exited       chan struct{} // closed when the firecracker process has exited
 	shutdownOnce sync.Once     // machine.Shutdown closes a channel, so it may only run once
 }
@@ -52,7 +54,43 @@ func New(cfg Config) (*VM, error) {
 		_ = os.RemoveAll(cfg.Dir())
 		return nil, fmt.Errorf("copy rootfs: %w", err)
 	}
-	return &VM{cfg: cfg, exited: make(chan struct{})}, nil
+	return &VM{cfg: cfg, exited: make(chan struct{}), agent: newAgentClient(cfg.VsockPath())}, nil
+}
+
+// Agent returns the client for this VM's guest agent. It only works when the guest runs with
+// beevm.mode=agent, and after WaitForAgent has succeeded.
+func (v *VM) Agent() *AgentClient { return v.agent }
+
+// WaitForAgent polls the agent's /health until it answers, and returns how long that took
+// since Start. It fails if the VM exits first or ctx ends.
+func (v *VM) WaitForAgent(ctx context.Context) (time.Duration, error) {
+	v.mu.Lock()
+	t0 := v.startedAt
+	v.mu.Unlock()
+	if t0.IsZero() {
+		return 0, errors.New("vm not started")
+	}
+	var lastErr error
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		// A short limit per attempt: before the agent listens, Firecracker closes the
+		// connection or the socket does not exist yet, and we simply try again.
+		try, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		_, err := v.agent.Health(try)
+		cancel()
+		if err == nil {
+			return time.Since(t0), nil
+		}
+		lastErr = err
+		select {
+		case <-v.exited:
+			return 0, fmt.Errorf("vm exited before the agent answered (last error: %v)", lastErr)
+		case <-ctx.Done():
+			return 0, fmt.Errorf("waiting for agent: %w (last error: %v)", ctx.Err(), lastErr)
+		case <-tick.C:
+		}
+	}
 }
 
 // ID returns the VM's id (useful when it was generated).
@@ -153,6 +191,8 @@ func (v *VM) sdkConfig() firecracker.Config {
 		KernelImagePath: v.cfg.KernelPath,
 		KernelArgs:      v.cfg.BootArgs(),
 		Drives:          firecracker.NewDrivesBuilder(v.cfg.VMRootfsPath()).Build(),
+		// Leave ID empty: Firecracker 1.x no longer uses vsock_id, and the SDK then omits it.
+		VsockDevices: []firecracker.VsockDevice{{Path: v.cfg.VsockPath(), CID: v.cfg.VsockCID}},
 		MachineCfg: models.MachineConfiguration{
 			VcpuCount:  firecracker.Int64(v.cfg.VCPUs),
 			MemSizeMib: firecracker.Int64(v.cfg.MemMiB),
@@ -263,6 +303,7 @@ func (v *VM) Kill() {
 // folder stays but only console.log is kept.
 func (v *VM) Cleanup(keepLogs bool) error {
 	v.Kill()
+	v.agent.Close()
 	v.mu.Lock()
 	if v.cancelVM != nil {
 		v.cancelVM()

@@ -42,6 +42,8 @@ Run everything from a **WSL terminal** inside this folder (`/mnt/c/Users/ommga/D
 - `make boot-test`: boot automatically, check it worked, print boot time.
 - `make clean-images`: delete images and run folders.
 - `make build`: build `bin/beevmd`. `./bin/beevmd boot [--hold 30s] [--keep-logs]`: boot one VM through the Go code, show console, stop, clean up.
+- `make examples`: build example functions (static) into `bin/functions/`. `./bin/beevmd invoke --code bin/functions/hello-go-binary --payload '{"name":"Om"}' --repeat 5`: boot a VM with the guest agent, upload the binary, run it, clean up.
+- The guest agent (`cmd/beevm-agent`) is built into the rootfs by `make rootfs` / `make images`; rebuild images after changing agent code.
 - `make test`: Go unit tests (no KVM). `make test-kvm`: tests that boot real VMs (`//go:build kvm`). `make vet`: go vet.
 - Calling `go` from Windows tools via `wsl.exe` mangles quotes and `$VARS`; put multi-line commands in a script file and run `wsl.exe -- bash <file>`, or use `make`.
 

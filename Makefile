@@ -3,7 +3,7 @@ BEEVM_HOME ?= $(HOME)/.beevm
 export BEEVM_HOME
 GO ?= /usr/local/go/bin/go
 
-.PHONY: help setup images kernel rootfs boot boot-test clean-images build test test-kvm vet
+.PHONY: help setup images kernel rootfs boot boot-test clean-images build examples test test-kvm vet
 
 help:
 	@echo "make setup        one-time install (Go, Firecracker, kernel, rootfs); needs sudo"
@@ -11,6 +11,7 @@ help:
 	@echo "make boot         boot a MicroVM with the shell script and get a shell (reboot -f to exit)"
 	@echo "make boot-test    boot with the shell script, check it worked, print boot time"
 	@echo "make build        build bin/beevmd"
+	@echo "make examples     build example functions (static) into bin/functions/"
 	@echo "make test         Go unit tests (no KVM needed)"
 	@echo "make test-kvm     Go tests that boot real MicroVMs (needs KVM)"
 	@echo "make vet          go vet"
@@ -33,6 +34,14 @@ boot-test:
 
 build:
 	$(GO) build -o bin/beevmd ./cmd/beevmd
+
+# Functions run inside an Alpine guest (musl), so they must be static: CGO_ENABLED=0.
+examples:
+	@mkdir -p bin/functions
+	@for f in hello-go-binary testfn; do \
+	  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -ldflags="-s -w" -o bin/functions/$$f ./examples/functions/$$f || exit 1; \
+	  echo "built bin/functions/$$f"; \
+	done
 
 test:
 	$(GO) test ./...
