@@ -88,6 +88,7 @@ func (s *Server) invoke(w http.ResponseWriter, r *http.Request) {
 		MemoryMiB: f.MemoryMiB, VCPUs: f.VCPUs, TimeoutMS: f.TimeoutMS,
 	})
 	info.vmID = res.VMID
+	info.start = res.StartKind
 	switch {
 	case errors.Is(err, runner.ErrBusy):
 		w.Header().Set("Retry-After", "1")
@@ -110,6 +111,8 @@ func (s *Server) invoke(w http.ResponseWriter, r *http.Request) {
 	h.Set(apitypes.HeaderTotalMS, strconv.FormatInt(res.TotalMS, 10))
 	h.Set(apitypes.HeaderCodeCache, info.cache)
 	h.Set(apitypes.HeaderFetchMS, strconv.FormatInt(fetchMS, 10))
+	h.Set(apitypes.HeaderStart, res.StartKind)
+	h.Set(apitypes.HeaderUploadMS, strconv.FormatInt(res.UploadMS, 10))
 
 	if res.FunctionError != "" {
 		code := res.ExitCode

@@ -6,6 +6,7 @@
 //	GET  /health    -> HealthResponse
 //	PUT  /function  -> body is the raw function binary; replies UploadResponse
 //	POST /invoke    -> InvokeRequest in, InvokeResponse out
+//	POST /resume    -> ResumeRequest in, ResumeResponse out (after a snapshot restore)
 package agentproto
 
 import (
@@ -21,6 +22,7 @@ const (
 	PathHealth   = "/health"
 	PathFunction = "/function"
 	PathInvoke   = "/invoke"
+	PathResume   = "/resume"
 )
 
 // FunctionPath is where the agent stores the uploaded function inside the guest. /run is a
@@ -66,6 +68,18 @@ type InvokeResponse struct {
 	ExitCode   int             `json:"exit_code"`        // -1 if it never started or was killed
 	DurationMS int64           `json:"duration_ms"`
 	Error      string          `json:"error,omitempty"` // empty means success
+}
+
+// ResumeRequest is sent once right after a VM was restored from a snapshot: the guest's
+// clock is behind and its random-number generator is a copy of every other restored VM's.
+type ResumeRequest struct {
+	UnixNano int64  `json:"unix_nano"` // the host's current time
+	Entropy  []byte `json:"entropy"`   // fresh random bytes from the host (base64 in JSON)
+}
+
+// ResumeResponse says how far the guest clock was moved.
+type ResumeResponse struct {
+	ClockAdjustedMS int64 `json:"clock_adjusted_ms"`
 }
 
 // ErrorResponse is the body of 4xx/5xx replies (problems with the request or the agent itself).

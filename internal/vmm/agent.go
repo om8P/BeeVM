@@ -3,6 +3,7 @@ package vmm
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -159,5 +160,21 @@ func (c *AgentClient) Invoke(ctx context.Context, payload json.RawMessage, timeo
 	}
 	var out agentproto.InvokeResponse
 	err = c.do(ctx, http.MethodPost, agentproto.PathInvoke, bytes.NewReader(body), int64(len(body)), &out)
+	return out, err
+}
+
+// Resume tells the agent that its VM was just restored from a snapshot: it sets the guest
+// clock to the host's time and reseeds the guest's random-number generator with fresh bytes.
+func (c *AgentClient) Resume(ctx context.Context) (agentproto.ResumeResponse, error) {
+	entropy := make([]byte, 64)
+	if _, err := rand.Read(entropy); err != nil {
+		return agentproto.ResumeResponse{}, fmt.Errorf("host random bytes: %w", err)
+	}
+	body, err := json.Marshal(agentproto.ResumeRequest{UnixNano: time.Now().UnixNano(), Entropy: entropy})
+	if err != nil {
+		return agentproto.ResumeResponse{}, err
+	}
+	var out agentproto.ResumeResponse
+	err = c.do(ctx, http.MethodPost, agentproto.PathResume, bytes.NewReader(body), int64(len(body)), &out)
 	return out, err
 }

@@ -33,6 +33,10 @@ type Server struct {
 	version  string
 	started  time.Time
 
+	// Changing the clock and the kernel's random state; replaced in unit tests.
+	setClock   func(time.Time) error
+	addEntropy func([]byte) error
+
 	// mu makes uploads and invocations run one at a time: a FaaS VM serves one request
 	// at a time, and an upload must not replace the binary while it is running.
 	mu sync.Mutex
@@ -40,15 +44,17 @@ type Server struct {
 
 // New creates a Server that stores the function at funcPath.
 func New(funcPath, version string) *Server {
-	return &Server{funcPath: funcPath, version: version, started: time.Now()}
+	return &Server{funcPath: funcPath, version: version, started: time.Now(),
+		setClock: setSystemClock, addEntropy: addKernelEntropy}
 }
 
-// Handler returns the HTTP handler for the three endpoints.
+// Handler returns the HTTP handler for the agent's endpoints.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+agentproto.PathHealth, s.handleHealth)
 	mux.HandleFunc("PUT "+agentproto.PathFunction, s.handleUpload)
 	mux.HandleFunc("POST "+agentproto.PathInvoke, s.handleInvoke)
+	mux.HandleFunc("POST "+agentproto.PathResume, s.handleResume)
 	return mux
 }
 

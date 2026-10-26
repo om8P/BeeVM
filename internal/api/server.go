@@ -89,6 +89,7 @@ type reqInfo struct {
 	tenant  string
 	vmID    string
 	cache   string // "hit" or "miss" for invoke calls
+	start   string // "restore" or "boot" for invoke calls
 	fetchMS int64
 }
 
@@ -142,6 +143,9 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 		}
 		if info.cache != "" {
 			attrs = append(attrs, "code_cache", info.cache, "fetch_ms", info.fetchMS)
+		}
+		if info.start != "" {
+			attrs = append(attrs, "start", info.start)
 		}
 		s.Logger.Info("request", attrs...)
 	})

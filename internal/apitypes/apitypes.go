@@ -14,6 +14,8 @@ const (
 	HeaderVMID       = "X-BeeVM-VM-Id"
 	HeaderCodeCache  = "X-BeeVM-Code-Cache" // "hit" (code was on the node) or "miss" (fetched from the artifact store)
 	HeaderFetchMS    = "X-BeeVM-Fetch-Ms"   // time spent fetching the code; 0 on a hit
+	HeaderStart      = "X-BeeVM-Start"      // how the VM started: "restore" (from a snapshot) or "boot"
+	HeaderUploadMS   = "X-BeeVM-Upload-Ms"  // time spent sending the code into the VM
 )
 
 // Function describes a deployed function.

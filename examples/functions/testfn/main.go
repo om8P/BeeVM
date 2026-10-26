@@ -5,9 +5,15 @@
 //	{"mode":"sleep","ms":N,"pidfile":P}   starts a background child (its pid goes to P), then sleeps N ms
 //	{"mode":"garbage"}                    prints text that is not JSON
 //	{"mode":"big","bytes":N}              prints a JSON string of about N bytes
+//	{"mode":"readfile","path":P}          prints {"content": "<first 64 KB of P>"} or {"error": ...}
+//	{"mode":"writefile","path":P}         writes a small file at P, prints {"ok": true} or {"error": ...}
+//	{"mode":"time"}                       prints {"unix_ms": <the guest's clock>}
+//	{"mode":"random"}                     prints {"hex": <16 random bytes from the kernel>}
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,6 +31,7 @@ func main() {
 		MS      int    `json:"ms"`
 		Bytes   int    `json:"bytes"`
 		PidFile string `json:"pidfile"`
+		Path    string `json:"path"`
 	}
 	_ = json.Unmarshal(raw, &p)
 
@@ -48,10 +55,36 @@ func main() {
 		fmt.Println(`{"slept":true}`)
 	case "garbage":
 		fmt.Println("this is not json")
+	case "readfile":
+		f, err := os.Open(p.Path)
+		if err != nil {
+			printJSON(map[string]string{"error": err.Error()})
+			return
+		}
+		data, _ := io.ReadAll(io.LimitReader(f, 64<<10))
+		f.Close()
+		printJSON(map[string]string{"content": string(data)})
+	case "writefile":
+		if err := os.WriteFile(p.Path, []byte("hello"), 0o644); err != nil {
+			printJSON(map[string]string{"error": err.Error()})
+			return
+		}
+		printJSON(map[string]bool{"ok": true})
+	case "time":
+		printJSON(map[string]int64{"unix_ms": time.Now().UnixMilli()})
+	case "random":
+		b := make([]byte, 16)
+		_, _ = rand.Read(b)
+		printJSON(map[string]string{"hex": hex.EncodeToString(b)})
 	case "big":
 		fmt.Printf("%q\n", strings.Repeat("x", p.Bytes))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown mode %q\n", p.Mode)
 		os.Exit(2)
 	}
+}
+
+func printJSON(v any) {
+	out, _ := json.Marshal(v)
+	fmt.Println(string(out))
 }

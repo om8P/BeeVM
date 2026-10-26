@@ -24,6 +24,7 @@ import (
 	"github.com/om8P/BeeVM/internal/codestore"
 	"github.com/om8P/BeeVM/internal/registry"
 	"github.com/om8P/BeeVM/internal/runner"
+	"github.com/om8P/BeeVM/internal/snapshot"
 	"github.com/om8P/BeeVM/internal/vmm"
 )
 
@@ -42,6 +43,12 @@ func buildFn(t *testing.T, name string) string {
 }
 
 func e2eServer(t *testing.T, maxVMs int, queueWait time.Duration) (*apiclient.Client, string, string) {
+	t.Helper()
+	return e2eServerWith(t, func(base vmm.Config) runner.Runner { return runner.NewColdRunner(base, maxVMs, queueWait) })
+}
+
+// e2eServerWith starts the API with the runner that mk builds from the VM base config.
+func e2eServerWith(t *testing.T, mk func(base vmm.Config) runner.Runner) (*apiclient.Client, string, string) {
 	t.Helper()
 	home := os.Getenv("BEEVM_HOME")
 	if home == "" {
@@ -68,7 +75,7 @@ func e2eServer(t *testing.T, maxVMs int, queueWait time.Duration) (*apiclient.Cl
 	code, _ := codestore.New(t.TempDir())
 	ts := httptest.NewServer(New(Deps{
 		Registry: reg, Code: code, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Runner: runner.NewColdRunner(base, maxVMs, queueWait),
+		Runner: mk(base),
 	}).Handler())
 	t.Cleanup(ts.Close)
 
@@ -206,6 +213,42 @@ func TestE2EBusyServerAnswers503(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Errorf("first call: %v", err)
+	}
+	noVMLeft(t, vmBase)
+}
+
+func TestE2ESnapshotRunnerRestores(t *testing.T) {
+	var snaps *snapshot.Manager
+	c, _, vmBase := e2eServerWith(t, func(base vmm.Config) runner.Runner {
+		m, err := snapshot.New(t.TempDir(), base, t.Logf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		snaps = m
+		return runner.NewSnapshotRunner(base, m, 2, 5*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if _, err := snaps.Ensure(ctx, 128, 1); err != nil { // as beevmd serve does at start-up
+		t.Fatal(err)
+	}
+	hello, err := os.Open(buildFn(t, "hello-go-binary"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hello.Close()
+	if _, _, err := c.Deploy(ctx, "hello", hello, apitypes.FunctionConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		res, err := c.Invoke(ctx, "hello", []byte(`{"name":"restore"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(res.Output), "Hello, restore!") || res.StartKind != "restore" {
+			t.Fatalf("call %d: %s (start %q)", i, res.Output, res.StartKind)
+		}
+		t.Logf("call %d: %s, ready %d ms, upload %d ms, server total %d ms", i, res.StartKind, res.BootMS, res.UploadMS, res.TotalMS)
 	}
 	noVMLeft(t, vmBase)
 }

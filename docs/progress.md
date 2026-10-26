@@ -12,7 +12,7 @@ Details of each milestone: `docs/milestones.md`.
 | 3 | Guest agent over vsock, first function runs | Done |
 | 4 | HTTP API, registry and CLI | Done |
 | 5 | Artifact store with MinIO/S3 | Done |
-| 6 | Snapshots and fast restore (the core) | Not started |
+| 6 | Snapshots and fast restore (the core) | Done, needs refinement (restore p50 47 ms but p99 59 ms on WSL2; snapshot load is the biggest part) |
 | 7 | Warm pool | Not started |
 | 8 | Python and Node.js runtimes, function snapshots | Not started |
 | 9 | Isolation and networking | Not started |
@@ -100,3 +100,33 @@ Status values: Not started · In progress · Done · Done, needs refinement (say
 - Learned: S3 bucket names must be lowercase; HEAD responses have no body so "not found" must be recognised by status/error code; Git Bash on Windows rewrites `/mnt/...` paths unless `MSYS_NO_PATHCONV=1` is set when calling `wsl.exe`.
 - **Next:** milestone 6 (snapshots and fast restore, the < 50 ms core).
 
+### 2026-10-27: Milestone 6
+- **Spike first** (KVM tests in `internal/vmm/snapshot_kvm_test.go`) confirmed the plan: a VM can be restored into a different folder when Firecracker runs inside the VM folder and the vsock socket path is relative (`v.sock`); 5 parallel restores from one memory file work (Firecracker maps it privately, copy-on-write).
+- **Shared read-only rootfs** (`vmm.Config.SharedRootfs`): no per-VM copy any more (saved ~0.4 s per cold call too); the kernel mounts it `ro`; init mounts tmpfs on `/run` and `/tmp`. Tested: writing to `/` fails, `/tmp` works and is private per VM.
+- **vmm:** `VM.Pause`, `VM.CreateSnapshot`, `vmm.Restore` (own small Firecracker API client `fcapi.go`: polls the API socket every 1 ms, `PUT /snapshot/load` with `mem_backend` File and `resume_vm`), `RestoreTimings{Spawn, Load}`, agent polling every 1 ms after restore, `VM.StartedAt`.
+- **Restored VMs are clones:** the guest clock was 3-9 s behind and all copies share one random-number state. New agent endpoint `POST /resume` (host time + 64 random bytes): sets the clock, adds the bytes with `RNDADDENTROPY` and forces `RNDRESEEDCRNG`. VMGenID is not active in our guest (no ACPI driver), so this is needed. Tested: clock within 1 s, two clones give different random bytes.
+- **Snapshot Manager** (`internal/snapshot`): key = hash of Firecracker version, kernel SHA-256, rootfs SHA-256 and path, boot args, memory, vCPUs (file hashes cached by size+mtime). `Ensure` builds once (single-flight, survives the caller hanging up) in `tmp-*` and renames into `snapshots/<key>/`; `List` marks stale snapshots, `RemoveStale`, `Remove`. Build = boot, wait for agent, **settle 1 s**, close connections, pause, snapshot (~2.1-2.5 s).
+- **Runner:** shared slot limiter; `SnapshotRunner` (restore -> resume -> upload -> invoke -> kill), falls back to booting if a snapshot cannot be built (no retry for a minute per size). `Result.StartKind`, `UploadMS`; headers `X-BeeVM-Start`, `X-BeeVM-Upload-Ms`; `beevm invoke -v` shows them.
+- **Commands:** `beevmd serve --runner snapshot|cold` (snapshot is default; builds the default snapshot at start-up and removes stale ones), `beevmd snapshot build|ls|rm`, `beevmd invoke --restore`, `beevmd bench coldstart`.
+- Verified: unit tests in 10 packages (new: snapshot 8, runner 4, agent resume 3, bench 2, API header check) incl. `-race`; all KVM tests (new: 3 vmm snapshot tests, real snapshot build+restore, end-to-end API with SnapshotRunner) and all M1-M5 tests pass; by hand `serve` with both runners, `snapshot ls`, `invoke --restore`. No leftover processes or folders.
+- **Benchmark** (`beevmd bench coldstart --runs 100`, WSL2 nested KVM, 1 vCPU, 128 MiB, page cache warm, one at a time):
+
+  | ms | p50 | p90 | p99 | max |
+  |---|---|---|---|---|
+  | boot: VM ready | 936.8 | 1020.8 | 1186.1 | 1350.0 |
+  | boot: first response | 955.8 | 1077.3 | 1213.9 | 1393.9 |
+  | restore: spawn | 1.4 | 2.0 | 2.9 | 5.0 |
+  | restore: load snapshot | 23.8 | 32.4 | 38.0 | 39.6 |
+  | restore: VM ready (incl. resume) | **47.0** | 55.3 | **59.1** | 63.8 |
+  | restore: upload 2.5 MB | 27.6 | 33.0 | 79.7 | 85.1 |
+  | restore: invoke | 15.2 | 16.4 | 17.3 | 17.9 |
+  | restore: first response | 91.0 | 100.1 | 138.0 | 149.9 |
+
+  Restore is ~20x faster than boot. **p50 is under 50 ms, p99 (59 ms) is not** on WSL2. Over HTTP a restored call takes ~130-160 ms in total.
+- Learned:
+  - **Settle before snapshotting.** A snapshot taken right after the agent starts makes the first reply after *every* restore take ~850 ms (the guest kernel accepts the vsock connection in ~6 ms, but the agent answers only after ~850 ms). Letting the VM run 0.5 s or more first brings it to 5-15 ms. Measured with a settle sweep (0, 0.2, 0.5, 1, 1.5, 2 s).
+  - **Lazy memory loading shows up in the first call.** After a restore, upload (28 ms vs 15 ms) and the call (15 ms vs 3 ms) are slower than after a boot: guest memory pages are read from the snapshot file the first time they are touched.
+  - The SDK's `WithSnapshot` still runs its vsock setup (Firecracker refuses configuration before a load) and polls every 10 ms, hence the own minimal API client.
+  - The Bash tool on this machine rewrites backslash escapes in heredocs (a `\n` in a Go string became a real line break several times); use the Edit/Write tools for code with escapes.
+- **Refine later (M6 refine):** the snapshot load (24 ms p50) dominates; try smaller guest memory, hugepages, a cold-page-cache run, and measure on the cloud node (no nested virtualization). The kernel's 0.5 s i8042 probe at boot (`i8042.noaux` etc.) only matters for cold boots. Snapshot backup to S3 (deferred).
+- **Next:** milestone 7 (warm pool: reuse running VMs for the ~1 ms path; restored VMs fill the pool).

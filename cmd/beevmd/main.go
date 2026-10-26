@@ -1,5 +1,5 @@
-// Command beevmd is the BeeVM daemon. For now it has one subcommand, boot, which starts a
-// single MicroVM, shows its console, stops it and cleans up. Later milestones add serve.
+// Command beevmd is the BeeVM daemon: the HTTP service (serve), its admin commands (tenant,
+// key, snapshot), and tools to try and measure VMs directly (boot, invoke, bench).
 package main
 
 import (
@@ -33,6 +33,10 @@ func main() {
 		os.Exit(runTenant(os.Args[2:]))
 	case "key":
 		os.Exit(runKey(os.Args[2:]))
+	case "snapshot":
+		os.Exit(runSnapshot(os.Args[2:]))
+	case "bench":
+		os.Exit(runBench(os.Args[2:]))
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -46,10 +50,12 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "usage: beevmd <command> [flags]")
 	fmt.Fprintln(os.Stderr, "commands:")
 	fmt.Fprintln(os.Stderr, "  boot     start one MicroVM, show its console, stop it and clean up")
-	fmt.Fprintln(os.Stderr, "  invoke   boot a VM, upload a function binary, run it (repeatedly), clean up")
+	fmt.Fprintln(os.Stderr, "  invoke   boot (or --restore) a VM, upload a function binary, run it (repeatedly), clean up")
 	fmt.Fprintln(os.Stderr, "  serve    run the HTTP API (deploy and invoke functions)")
 	fmt.Fprintln(os.Stderr, "  tenant   add | ls   (manage customers; prints a new API key on add)")
 	fmt.Fprintln(os.Stderr, "  key      add | ls | revoke   (manage API keys)")
+	fmt.Fprintln(os.Stderr, "  snapshot build | ls | rm <key> | rm --stale   (base snapshots for fast restore)")
+	fmt.Fprintln(os.Stderr, "  bench    coldstart   (measure boot vs snapshot restore, p50/p99)")
 }
 
 // vmConfig builds the VM config shared by the subcommands.
