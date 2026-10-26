@@ -41,10 +41,13 @@ Run everything from a **WSL terminal** inside this folder (`/mnt/c/Users/ommga/D
 - `make boot`: boot a MicroVM and get a shell (`reboot -f` to exit).
 - `make boot-test`: boot automatically, check it worked, print boot time.
 - `make clean-images`: delete images and run folders.
-- `make build`: build `bin/beevmd`. `./bin/beevmd boot [--hold 30s] [--keep-logs]`: boot one VM through the Go code, show console, stop, clean up.
+- `make build`: build `bin/beevmd` (server) and `bin/beevm` (user CLI).
+- Run the service: `./bin/beevmd tenant add <name>` (prints the API key once; also `tenant ls`, `key add|ls|revoke`), then `./bin/beevmd serve [--addr 127.0.0.1:8080] [--max-vms 8]`. Users: `export BEEVM_API_KEY=...`, then `beevm deploy <name> <binary>`, `beevm invoke <name> --payload '{...}' [-v]`, `beevm ls`, `beevm rm <name>`. API: `PUT /api/v1/functions/{name}` (multipart), `POST /invoke/{name}`; keys go in `Authorization: Bearer`.
+- Data lives in `$BEEVM_HOME`: `beevm.db` (SQLite registry), `functions/<sha256>` (code), `run/serve/` (the server's VM folders, cleared on start), `run/vms/` (`boot`/`invoke` commands).
+- `./bin/beevmd boot [--hold 30s] [--keep-logs]`: boot one VM through the Go code, show console, stop, clean up.
 - `make examples`: build example functions (static) into `bin/functions/`. `./bin/beevmd invoke --code bin/functions/hello-go-binary --payload '{"name":"Om"}' --repeat 5`: boot a VM with the guest agent, upload the binary, run it, clean up.
 - The guest agent (`cmd/beevm-agent`) is built into the rootfs by `make rootfs` / `make images`; rebuild images after changing agent code.
-- `make test`: Go unit tests (no KVM). `make test-kvm`: tests that boot real VMs (`//go:build kvm`). `make vet`: go vet.
+- `make test`: Go unit tests (no KVM). `make test-kvm`: tests that boot real VMs (`//go:build kvm`), all packages including the end-to-end API test. `make vet`: go vet.
 - Calling `go` from Windows tools via `wsl.exe` mangles quotes and `$VARS`; put multi-line commands in a script file and run `wsl.exe -- bash <file>`, or use `make`.
 
 (Add more as they come to exist.)

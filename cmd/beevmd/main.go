@@ -27,6 +27,12 @@ func main() {
 		os.Exit(runBoot(os.Args[2:]))
 	case "invoke":
 		os.Exit(runInvoke(os.Args[2:]))
+	case "serve":
+		os.Exit(runServe(os.Args[2:]))
+	case "tenant":
+		os.Exit(runTenant(os.Args[2:]))
+	case "key":
+		os.Exit(runKey(os.Args[2:]))
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -41,6 +47,9 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "commands:")
 	fmt.Fprintln(os.Stderr, "  boot     start one MicroVM, show its console, stop it and clean up")
 	fmt.Fprintln(os.Stderr, "  invoke   boot a VM, upload a function binary, run it (repeatedly), clean up")
+	fmt.Fprintln(os.Stderr, "  serve    run the HTTP API (deploy and invoke functions)")
+	fmt.Fprintln(os.Stderr, "  tenant   add | ls   (manage customers; prints a new API key on add)")
+	fmt.Fprintln(os.Stderr, "  key      add | ls | revoke   (manage API keys)")
 }
 
 // vmConfig builds the VM config shared by the subcommands.
