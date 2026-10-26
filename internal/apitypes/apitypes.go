@@ -12,6 +12,8 @@ const (
 	HeaderFunctionMS = "X-BeeVM-Function-Ms" // time the function itself ran
 	HeaderTotalMS    = "X-BeeVM-Total-Ms"    // whole request, inside the server
 	HeaderVMID       = "X-BeeVM-VM-Id"
+	HeaderCodeCache  = "X-BeeVM-Code-Cache" // "hit" (code was on the node) or "miss" (fetched from the artifact store)
+	HeaderFetchMS    = "X-BeeVM-Fetch-Ms"   // time spent fetching the code; 0 on a hit
 )
 
 // Function describes a deployed function.

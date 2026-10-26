@@ -37,3 +37,8 @@ download() {
     echo "$sha  $dest" | sha256sum -c --quiet - || { rm -f "$dest"; die "checksum mismatch for $dest"; }
   fi
 }
+
+# MinIO (local S3 server for development). MinIO archived its project in 2026 and no longer
+# serves binaries (410 Gone), so scripts/minio.sh builds this pinned source version with Go.
+# The Go checksum database guarantees the source is what it was when we pinned it.
+export MINIO_GO_VERSION="v0.0.0-20260212201848-7aac2a2c5b7c"

@@ -86,8 +86,10 @@ const (
 
 // reqInfo is filled in as a request moves along, and logged at the end.
 type reqInfo struct {
-	tenant string
-	vmID   string
+	tenant  string
+	vmID    string
+	cache   string // "hit" or "miss" for invoke calls
+	fetchMS int64
 }
 
 func tenantFrom(ctx context.Context) registry.Tenant {
@@ -134,9 +136,14 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 		if status == 0 {
 			status = http.StatusOK
 		}
-		s.Logger.Info("request",
+		attrs := []any{
 			"method", r.Method, "path", r.URL.Path, "tenant", info.tenant,
-			"status", status, "duration_ms", time.Since(start).Milliseconds(), "vm", info.vmID)
+			"status", status, "duration_ms", time.Since(start).Milliseconds(), "vm", info.vmID,
+		}
+		if info.cache != "" {
+			attrs = append(attrs, "code_cache", info.cache, "fetch_ms", info.fetchMS)
+		}
+		s.Logger.Info("request", attrs...)
 	})
 }
 

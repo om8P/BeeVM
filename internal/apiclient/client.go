@@ -159,7 +159,9 @@ type InvokeResult struct {
 	VMID       string
 	BootMS     int64
 	FunctionMS int64
-	TotalMS    int64 // inside the server; the caller measures its own round trip
+	TotalMS    int64  // inside the server; the caller measures its own round trip
+	CodeCache  string // "hit" or "miss"; empty if the server did not say
+	FetchMS    int64  // time the server spent fetching the code from the artifact store
 }
 
 // Invoke runs a function. payload must be valid JSON (nil or empty means no input). A function
@@ -178,5 +180,6 @@ func (c *Client) Invoke(ctx context.Context, name string, payload []byte) (Invok
 	return InvokeResult{
 		Output: json.RawMessage(out), VMID: resp.Header.Get(apitypes.HeaderVMID),
 		BootMS: ms(apitypes.HeaderBootMS), FunctionMS: ms(apitypes.HeaderFunctionMS), TotalMS: ms(apitypes.HeaderTotalMS),
+		CodeCache: resp.Header.Get(apitypes.HeaderCodeCache), FetchMS: ms(apitypes.HeaderFetchMS),
 	}, nil
 }

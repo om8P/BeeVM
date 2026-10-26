@@ -11,7 +11,7 @@ Details of each milestone: `docs/milestones.md`.
 | 2 | Boot and stop a VM from Go | Done |
 | 3 | Guest agent over vsock, first function runs | Done |
 | 4 | HTTP API, registry and CLI | Done |
-| 5 | Artifact store with MinIO/S3 | Not started |
+| 5 | Artifact store with MinIO/S3 | Done |
 | 6 | Snapshots and fast restore (the core) | Not started |
 | 7 | Warm pool | Not started |
 | 8 | Python and Node.js runtimes, function snapshots | Not started |
@@ -75,3 +75,28 @@ Status values: Not started · In progress · Done · Done, needs refinement (say
 - Decisions/differences from the plan: key prefix is 12 characters (`bvm_` + 8), not 8, to make prefixes unique enough to revoke by; client hang-up is logged as status 499; `beevmd serve` assumes it is the only server using `run/serve/`; a tiny race exists if two deploys of identical code race with a delete (code could be removed just before the second deploy registers it): acceptable for now.
 - Noted for later: the per-call rootfs copy (~0.4 s) is a clear target for M6 tuning (read-only base + overlay, or reflink); `go get` for cobra upgraded an old indirect v0.0.3 to v1.10.2.
 - **Next:** milestone 5 (artifact store with MinIO/S3; can be swapped later) or, per the order in `docs/milestones.md`, milestone 6 (snapshots, the < 50 ms core).
+
+### 2026-10-26: Milestone 5
+- **Artifact store** (`internal/store`): `Blobs` interface (Put/Get/Exists/Delete) with an `S3` implementation on aws-sdk-go-v2 (works for MinIO and AWS S3; credentials from the standard AWS chain, never flags) and an in-memory `Mem` for tests. Uploads send a SHA-256 checksum so the server verifies them. Keys are `functions/<sha256>`.
+- **codestore is now a cache** in front of the store: `Publish` (upload if missing, so identical code uploads once), `Ensure` (local hit, or download, check the hash, move into place; parallel misses share one download via singleflight), `Delete` removes local and remote. Without a bucket it behaves exactly like M4.
+- **API:** deploy uploads to S3 *before* registering (S3 down gives 503 + `Retry-After`, nothing registered); invoke calls `Ensure` and returns `X-BeeVM-Code-Cache: hit|miss` and `X-BeeVM-Fetch-Ms` (also in the request log; `beevm invoke -v` prints them). Cached code keeps working while S3 is down.
+- **Config:** `beevmd serve --s3-bucket/--s3-endpoint/--s3-region/--s3-path-style` or `BEEVM_S3_*` env. No bucket = local-only with a warning. A configured but unreachable store makes the server refuse to start. Real AWS = unset endpoint + real credentials; nothing else changes.
+- **Local MinIO:** `make minio` (no Docker), `make minio-up/minio-down` (Compose), settings in `deploy/minio.env` (throw-away dev credentials), `make test-s3`.
+- **MinIO is archived:** dl.min.io now answers 410 Gone for every community binary, so `scripts/minio.sh` builds the pinned source (`MINIO_GO_VERSION` in `scripts/common.sh`, Go checksum database verifies it) instead of downloading. First build takes a few minutes. The Compose image tag (`quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z`) is from memory and **not tested** (no Docker in WSL here); if the pull fails use `make minio`. The code only speaks plain S3, so any S3-compatible server works.
+- Verified: unit tests in 9 packages (also with `-race`), `make test-s3` against real MinIO, `make test-kvm` (all M1-M4 tests still pass). By hand with a real server + MinIO: deploy puts one object in the bucket; after wiping the local cache the first invoke is a miss (18 ms fetch) and the next a hit; deploying identical code under a second name adds no object; removing both functions empties the bucket; with MinIO stopped, deploying new code gives 503 while cached functions still run and the server refuses to start; without a bucket it runs local-only. No leftover processes.
+- Not done on purpose (later): cache size limit/eviction, retries with backoff on failed downloads, presigned direct uploads from the CLI, a KVM end-to-end variant backed by S3 (covered by the manual run), snapshot backups to S3 (M6).
+- Learned: S3 bucket names must be lowercase; HEAD responses have no body so "not found" is recognised by error code; Git Bash on Windows rewrites `/mnt/...` paths unless `MSYS_NO_PATHCONV=1` is set when calling `wsl.exe`.
+- **Next:** milestone 6 (snapshots and fast restore, the < 50 ms core).
+
+### 2026-10-26: Milestone 5
+- **Artifact store** (`internal/store`): `Blobs` interface (Put/Get/Exists/Delete) with an `S3` implementation on aws-sdk-go-v2 (works for MinIO and AWS S3; credentials from the standard AWS chain, never flags) and an in-memory `Mem` for tests. Uploads send a SHA-256 checksum so the server verifies them. Keys are `functions/<sha256>`.
+- **codestore is now a cache** in front of the store: `Publish` (upload if missing, so identical code uploads once), `Ensure` (local hit, or download, check the hash, move into place; parallel misses share one download via singleflight), `Delete` removes local and remote. Without a bucket it behaves exactly like M4.
+- **API:** deploy uploads to S3 *before* registering (S3 down gives 503 + `Retry-After`, nothing registered); invoke calls `Ensure` and returns `X-BeeVM-Code-Cache: hit|miss` and `X-BeeVM-Fetch-Ms` (also in the request log; `beevm invoke -v` prints them). Cached code keeps working while S3 is down.
+- **Config:** `beevmd serve --s3-bucket/--s3-endpoint/--s3-region/--s3-path-style` or `BEEVM_S3_*` env. No bucket = local-only with a warning. A configured but unreachable store makes the server refuse to start. Real AWS = unset endpoint + real credentials; nothing else changes.
+- **Local MinIO:** `make minio` (no Docker), `make minio-up/minio-down` (Compose), settings in `deploy/minio.env` (throw-away dev credentials), `make test-s3`.
+- **MinIO is archived:** dl.min.io now answers 410 Gone for every community binary, so `scripts/minio.sh` builds the pinned source (`MINIO_GO_VERSION` in `scripts/common.sh`, Go checksum database verifies it) instead of downloading. First build takes a few minutes. The Compose image tag (`quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z`) is from memory and **not tested** (no Docker in WSL here); if the pull fails use `make minio`. The code only speaks plain S3, so any S3-compatible server works.
+- Verified: unit tests in 9 packages (store 5, codestore 10 new, api 8 new, run with `-race`), `make test-s3` against real MinIO, `make test-kvm` (all M1-M4 tests still pass). By hand with a real server + MinIO: deploy puts one object in the bucket; after wiping the local cache the first invoke is a miss (18 ms fetch) and the next a hit; deploying identical code under a second name adds no object; removing both functions empties the bucket; with MinIO stopped, deploying new code gives 503 while cached functions still run and the server refuses to start; without a bucket it runs local-only. No leftover processes.
+- Not done on purpose (later): cache size limit/eviction, retries with backoff on failed downloads, presigned direct uploads from the CLI, a KVM end-to-end variant backed by S3 (covered by the manual run), snapshot backups to S3 (M6).
+- Learned: S3 bucket names must be lowercase; HEAD responses have no body so "not found" must be recognised by status/error code; Git Bash on Windows rewrites `/mnt/...` paths unless `MSYS_NO_PATHCONV=1` is set when calling `wsl.exe`.
+- **Next:** milestone 6 (snapshots and fast restore, the < 50 ms core).
+
