@@ -10,7 +10,7 @@ help:
 	@echo "make images       (re)build kernel + rootfs only"
 	@echo "make boot         boot a MicroVM with the shell script and get a shell (reboot -f to exit)"
 	@echo "make boot-test    boot with the shell script, check it worked, print boot time"
-	@echo "make build        build bin/beevmd"
+	@echo "make build        build bin/beevmd (server) and bin/beevm (user CLI)"
 	@echo "make examples     build example functions (static) into bin/functions/"
 	@echo "make test         Go unit tests (no KVM needed)"
 	@echo "make test-kvm     Go tests that boot real MicroVMs (needs KVM)"
@@ -34,6 +34,7 @@ boot-test:
 
 build:
 	$(GO) build -o bin/beevmd ./cmd/beevmd
+	@if [ -d cmd/beevm ]; then $(GO) build -o bin/beevm ./cmd/beevm; fi
 
 # Functions run inside an Alpine guest (musl), so they must be static: CGO_ENABLED=0.
 examples:
@@ -47,7 +48,7 @@ test:
 	$(GO) test ./...
 
 test-kvm:
-	$(GO) test -tags kvm -v -count=1 ./internal/vmm/
+	$(GO) test -tags kvm -v -count=1 ./internal/...
 
 vet:
 	$(GO) vet ./...

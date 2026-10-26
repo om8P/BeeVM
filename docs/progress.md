@@ -10,7 +10,7 @@ Details of each milestone: `docs/milestones.md`.
 | 1 | Environment and a hand-booted MicroVM | Done, needs refinement (boot ~1.8 s under WSL2; no `kvm` test yet) |
 | 2 | Boot and stop a VM from Go | Done |
 | 3 | Guest agent over vsock, first function runs | Done |
-| 4 | HTTP API, registry and CLI | Not started |
+| 4 | HTTP API, registry and CLI | Done |
 | 5 | Artifact store with MinIO/S3 | Not started |
 | 6 | Snapshots and fast restore (the core) | Not started |
 | 7 | Warm pool | Not started |
@@ -64,3 +64,14 @@ Status values: Not started · In progress · Done · Done, needs refinement (say
 - Learned: `go get` for vsock also bumped `golang.org/x/*`; fine. Firecracker closes the connection when the guest port is not listening yet, so `WaitForAgent` just retries `/health` every 10 ms. Passing `$VARS` or `|` through `wsl.exe` still breaks: use script files or `make`.
 - Not done on purpose (later): zombie reaping of daemonized grandchildren, streaming large outputs, agent auth, reconnecting after a snapshot restore (M6).
 - **Next:** milestone 4 (HTTP API, registry and CLI).
+
+### 2026-10-26: Milestone 4
+- **Registry** (`internal/registry`, SQLite via modernc, pure Go): tenants, API keys (only the SHA-256 hash is stored; keys are `bvm_` + 43 random chars, 256 bits), functions (unique per tenant, settings: memory 64-1024 MiB, vCPUs 1-4, timeout 1-60 s). Schema version in `PRAGMA user_version` (migrations run on open), WAL mode so `beevmd tenant add` works while the server runs. **Code store** (`internal/codestore`): binaries under `$BEEVM_HOME/functions/<sha256>`, identical bytes stored once, old code deleted when no function uses it.
+- **API** (`internal/api`, chi): `PUT/GET/DELETE /api/v1/functions[/{name}]`, `POST /invoke/{name}`, `GET /healthz`. Bearer-key auth (401 + `WWW-Authenticate`, revoked keys stop working immediately); another tenant's function is 404, never 403; deploy checks the ELF magic bytes; invoke answers 200 with the function's output (+ `X-BeeVM-Boot-Ms/Function-Ms/Total-Ms/Vm-Id` headers), 502 when the function fails (exit code and stderr in the body), 503 + `Retry-After` when no VM slot is free, 413/400 for bad payloads, 500 without internal details; one JSON log line per request (slog); panics become 500.
+- **Runner** (`internal/runner`): `Runner` interface; `ColdRunner` boots one VM per call (agent mode), limited to `--max-vms` slots, waits `--queue-wait` for a slot, disposes of the VM with Kill+delete (no graceful stop needed). M6/M7 will add runners behind the same interface.
+- **Commands:** `beevmd serve` (graceful shutdown: running calls finish, 2nd Ctrl-C stops waiting; own VM folder `run/serve/` cleared on start), `beevmd tenant add|ls`, `beevmd key add|ls|revoke` (tenants and keys are created on the server, no admin key on the network); `beevm deploy|invoke|ls|rm` (cobra; `internal/apiclient`; checks the binary is Linux x86-64 ELF and warns if dynamically linked; payload from flag, file or stdin).
+- Verified: unit tests in 8 packages (registry 12, codestore 5, api 15, apiclient 7, runner 4, cmd/beevm 7, plus earlier ones); VM tests incl. 4 end-to-end tests (deploy+invoke, failing/slow function, 5 parallel calls through 2 slots, 503 when busy) and 4 ColdRunner tests; M1-M3 tests still pass. Hand check with a real server, the CLI and curl: 200 with key, 401 without/with wrong key, 502 for a failing function, 404 for unknown/removed functions, deploy replaces, 10 parallel invokes with 4 slots all 200 (waves of 4: ~2.1 s, 4.1 s, 6.1 s), Ctrl-C on the server during a call lets it finish and exits 0. No leftover firecracker processes or folders in any case.
+- Numbers (WSL2, 1 vCPU, 128 MiB): one invoke over HTTP **2.5-2.6 s** = VM boot until agent ready 2.0-2.1 s (earlier runs 1.6-1.9 s; this machine varies) + ~0.45 s for everything else (copying the 64 MB rootfs, upload of 2.5 MB, the call itself 9-18 ms, kill and cleanup). Warm path does not exist yet.
+- Decisions/differences from the plan: key prefix is 12 characters (`bvm_` + 8), not 8, to make prefixes unique enough to revoke by; client hang-up is logged as status 499; `beevmd serve` assumes it is the only server using `run/serve/`; a tiny race exists if two deploys of identical code race with a delete (code could be removed just before the second deploy registers it): acceptable for now.
+- Noted for later: the per-call rootfs copy (~0.4 s) is a clear target for M6 tuning (read-only base + overlay, or reflink); `go get` for cobra upgraded an old indirect v0.0.3 to v1.10.2.
+- **Next:** milestone 5 (artifact store with MinIO/S3; can be swapped later) or, per the order in `docs/milestones.md`, milestone 6 (snapshots, the < 50 ms core).
