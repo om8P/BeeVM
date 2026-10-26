@@ -29,7 +29,8 @@ type Config struct {
 	BaseDir        string // parent of the per-VM folder, e.g. ~/.beevm/run/vms
 	FirecrackerBin string // path to the firecracker binary
 	KernelPath     string // path to vmlinux
-	RootfsPath     string // base rootfs image; each VM gets its own copy
+	RootfsPath     string // base rootfs image; each VM gets its own copy unless SharedRootfs
+	SharedRootfs   bool   // all VMs use RootfsPath directly, read-only (no copy; needed for snapshots)
 	ExtraBootArgs  string // appended to DefaultBootArgs, e.g. "beevm.mode=idle"
 	VCPUs          int64  // default 1
 	MemMiB         int64  // default 128
@@ -100,10 +101,21 @@ func (c Config) Dir() string { return filepath.Join(c.BaseDir, c.ID) }
 func (c Config) SocketPath() string { return filepath.Join(c.Dir(), "firecracker.sock") }
 
 // VsockPath is the Unix socket through which the host reaches the guest's vsock ports.
-func (c Config) VsockPath() string { return filepath.Join(c.Dir(), "v.sock") }
+func (c Config) VsockPath() string { return filepath.Join(c.Dir(), VsockRelPath) }
+
+// VsockRelPath is the vsock socket's name as Firecracker is told it: relative to the VM folder,
+// which is Firecracker's working directory. A snapshot stores this path, so a VM restored in
+// another folder creates its socket in its own folder instead of the original VM's.
+const VsockRelPath = "v.sock"
 
 // ConsolePath is where guest serial output and Firecracker's own messages are written.
 func (c Config) ConsolePath() string { return filepath.Join(c.Dir(), "console.log") }
 
-// VMRootfsPath is this VM's private copy of the root filesystem.
-func (c Config) VMRootfsPath() string { return filepath.Join(c.Dir(), "rootfs.ext4") }
+// VMRootfsPath is the root filesystem this VM uses: the shared read-only image, or its
+// private copy.
+func (c Config) VMRootfsPath() string {
+	if c.SharedRootfs {
+		return c.RootfsPath
+	}
+	return filepath.Join(c.Dir(), "rootfs.ext4")
+}

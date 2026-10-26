@@ -28,8 +28,10 @@ case "$MODE" in
     while true; do sleep 3600 & wait $!; done
     ;;
   agent)
-    # /run is RAM (tmpfs): the agent stores the uploaded function there, never on the disk image.
+    # /run and /tmp are RAM (tmpfs). The root disk may be shared by many VMs and read-only,
+    # so the uploaded function (in /run) and anything a function writes (in /tmp) live in RAM.
     mount -t tmpfs tmpfs /run
+    mount -t tmpfs tmpfs /tmp
     /sbin/beevm-agent &
     AGENT_PID=$!
     echo "BEEVM_AGENT_STARTED"

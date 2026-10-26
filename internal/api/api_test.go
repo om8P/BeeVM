@@ -61,6 +61,7 @@ func newEnv(t *testing.T) *env {
 	code, _ := codestore.New(codeDir)
 	fr := &fakeRunner{result: runner.Result{
 		Output: json.RawMessage(`{"ok":true}`), VMID: "vm123", BootMS: 1700, FunctionMS: 4, TotalMS: 1800,
+		StartKind: runner.StartRestore, UploadMS: 70,
 	}}
 	srv := New(Deps{
 		Registry: reg, Code: code, Runner: fr,
@@ -359,6 +360,7 @@ func TestInvokeSuccess(t *testing.T) {
 	for h, want := range map[string]string{
 		apitypes.HeaderVMID: "vm123", apitypes.HeaderBootMS: "1700",
 		apitypes.HeaderFunctionMS: "4", apitypes.HeaderTotalMS: "1800",
+		apitypes.HeaderStart: "restore", apitypes.HeaderUploadMS: "70",
 	} {
 		if got := resp.Header.Get(h); got != want {
 			t.Errorf("header %s = %q, want %q", h, got, want)

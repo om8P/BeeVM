@@ -32,13 +32,15 @@ type VM struct {
 	console   *os.File
 	cancelVM  context.CancelFunc
 
-	agent *AgentClient // talks to the guest agent over vsock
+	agent     *AgentClient  // talks to the guest agent over vsock
+	agentPoll time.Duration // how often WaitForAgent retries
 
 	exited       chan struct{} // closed when the firecracker process has exited
 	shutdownOnce sync.Once     // machine.Shutdown closes a channel, so it may only run once
 }
 
-// New creates the VM's folder and copies the base rootfs into it. No process is started.
+// New creates the VM's folder and (unless SharedRootfs) copies the base rootfs into it.
+// No process is started.
 func New(cfg Config) (*VM, error) {
 	cfg, err := cfg.applyDefaults()
 	if err != nil {
@@ -50,11 +52,17 @@ func New(cfg Config) (*VM, error) {
 	if err := os.MkdirAll(cfg.Dir(), 0o700); err != nil {
 		return nil, fmt.Errorf("create vm folder: %w", err)
 	}
-	if err := copyFile(cfg.RootfsPath, cfg.VMRootfsPath()); err != nil {
-		_ = os.RemoveAll(cfg.Dir())
-		return nil, fmt.Errorf("copy rootfs: %w", err)
+	if !cfg.SharedRootfs {
+		if err := copyFile(cfg.RootfsPath, cfg.VMRootfsPath()); err != nil {
+			_ = os.RemoveAll(cfg.Dir())
+			return nil, fmt.Errorf("copy rootfs: %w", err)
+		}
 	}
-	return &VM{cfg: cfg, exited: make(chan struct{}), agent: newAgentClient(cfg.VsockPath())}, nil
+	return newVM(cfg, 10*time.Millisecond), nil
+}
+
+func newVM(cfg Config, agentPoll time.Duration) *VM {
+	return &VM{cfg: cfg, exited: make(chan struct{}), agent: newAgentClient(cfg.VsockPath()), agentPoll: agentPoll}
 }
 
 // Agent returns the client for this VM's guest agent. It only works when the guest runs with
@@ -71,7 +79,7 @@ func (v *VM) WaitForAgent(ctx context.Context) (time.Duration, error) {
 		return 0, errors.New("vm not started")
 	}
 	var lastErr error
-	tick := time.NewTicker(10 * time.Millisecond)
+	tick := time.NewTicker(v.agentPoll)
 	defer tick.Stop()
 	for {
 		// A short limit per attempt: before the agent listens, Firecracker closes the
@@ -112,6 +120,13 @@ func (v *VM) PID() int {
 	return v.cmd.Process.Pid
 }
 
+// StartedAt is when the firecracker process was started (zero before Start or Restore).
+func (v *VM) StartedAt() time.Time {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.startedAt
+}
+
 // Exited is closed when the firecracker process has ended.
 func (v *VM) Exited() <-chan struct{} { return v.exited }
 
@@ -140,6 +155,8 @@ func (v *VM) Start(ctx context.Context) error {
 		WithStdout(console).
 		WithStderr(console).
 		Build(vmCtx) // Stdin is nil, which means /dev/null
+	// Firecracker runs inside the VM folder, so relative paths (the vsock socket) land there.
+	cmd.Dir = v.cfg.Dir()
 
 	logger := logrus.New()
 	logger.SetOutput(io.Discard) // the SDK is chatty; real problems come back as errors
@@ -190,9 +207,13 @@ func (v *VM) sdkConfig() firecracker.Config {
 		SocketPath:      v.cfg.SocketPath(),
 		KernelImagePath: v.cfg.KernelPath,
 		KernelArgs:      v.cfg.BootArgs(),
-		Drives:          firecracker.NewDrivesBuilder(v.cfg.VMRootfsPath()).Build(),
+		// A shared rootfs is read-only (Firecracker then tells the kernel to mount it "ro"),
+		// so many VMs can use the same file at once.
+		Drives: firecracker.DrivesBuilder{}.WithRootDrive(v.cfg.VMRootfsPath(),
+			firecracker.WithReadOnly(v.cfg.SharedRootfs)).Build(),
 		// Leave ID empty: Firecracker 1.x no longer uses vsock_id, and the SDK then omits it.
-		VsockDevices: []firecracker.VsockDevice{{Path: v.cfg.VsockPath(), CID: v.cfg.VsockCID}},
+		// The path is relative to the VM folder (see VsockRelPath).
+		VsockDevices: []firecracker.VsockDevice{{Path: VsockRelPath, CID: v.cfg.VsockCID}},
 		MachineCfg: models.MachineConfiguration{
 			VcpuCount:  firecracker.Int64(v.cfg.VCPUs),
 			MemSizeMib: firecracker.Int64(v.cfg.MemMiB),
@@ -252,14 +273,42 @@ func consoleHasLine(path, marker string) (bool, error) {
 	return false, nil
 }
 
+// Pause freezes the VM's vCPUs. A snapshot can only be taken of a paused VM.
+func (v *VM) Pause(ctx context.Context) error {
+	v.mu.Lock()
+	machine := v.machine
+	v.mu.Unlock()
+	if machine == nil {
+		return errors.New("vm not started")
+	}
+	return machine.PauseVM(ctx)
+}
+
+// CreateSnapshot writes the paused VM's memory (memPath) and its CPU and device state
+// (statePath). Both files must not exist yet.
+func (v *VM) CreateSnapshot(ctx context.Context, memPath, statePath string) error {
+	v.mu.Lock()
+	machine := v.machine
+	v.mu.Unlock()
+	if machine == nil {
+		return errors.New("vm not started")
+	}
+	return machine.CreateSnapshot(ctx, memPath, statePath)
+}
+
 // Stop asks the guest to shut down (Ctrl-Alt-Del) and waits until ctx ends; if the VM has
 // not exited by then it is killed. It reports whether the shutdown was graceful.
 func (v *VM) Stop(ctx context.Context) (graceful bool, err error) {
 	v.mu.Lock()
 	machine, started := v.machine, v.started
 	v.mu.Unlock()
-	if !started || machine == nil {
+	if !started {
 		return true, nil
+	}
+	if machine == nil {
+		// A restored VM has no SDK machine; it is disposable, so stopping means killing.
+		v.Kill()
+		return false, nil
 	}
 	select {
 	case <-v.exited:
