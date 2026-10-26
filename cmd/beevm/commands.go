@@ -139,6 +139,9 @@ func newInvoke(s *settings) *cobra.Command {
 			if verbose {
 				fmt.Fprintf(os.Stderr, "vm %s: boot %d ms, function %d ms, server total %d ms, round trip %d ms\n",
 					res.VMID, res.BootMS, res.FunctionMS, res.TotalMS, rtt.Milliseconds())
+				if res.CodeCache != "" {
+					fmt.Fprintf(os.Stderr, "code cache: %s, fetch %d ms\n", res.CodeCache, res.FetchMS)
+				}
 			}
 			return nil
 		},

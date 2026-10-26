@@ -1,0 +1,26 @@
+# Local S3 server (MinIO) in Docker. Alternative to `make minio`, which needs no Docker.
+#   docker compose -f deploy/docker-compose.yml up -d     (or: make minio-up)
+# Credentials match deploy/minio.env.
+#
+# NOTE: MinIO archived its open-source project in 2026. This image tag is the last release we
+# know of; if the pull fails, use `make minio` (builds from source) or any S3-compatible server.
+services:
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: beevmdev
+      MINIO_ROOT_PASSWORD: beevmdev-secret
+    ports:
+      - "127.0.0.1:9000:9000"   # S3 API
+      - "127.0.0.1:9001:9001"   # web console
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  minio-data:

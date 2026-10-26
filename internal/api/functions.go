@@ -112,6 +112,16 @@ func (s *Server) putFunction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Upload to the artifact store BEFORE registering, so a registered function always has its
+	// code there. (No-op without an artifact store.)
+	if err := s.Code.Publish(r.Context(), hash); err != nil {
+		s.releaseCode(hash)
+		s.Logger.Error("publish code to artifact store", "error", err)
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, "artifact store unavailable, try again shortly")
+		return
+	}
+
 	f, created, oldSHA, err := s.Registry.PutFunction(tenant.ID, name, registry.Spec{
 		CodeSHA256: hash, CodeSize: codeSize,
 		MemoryMiB: cfg.MemoryMiB, VCPUs: cfg.VCPUs, TimeoutMS: cfg.TimeoutMS,

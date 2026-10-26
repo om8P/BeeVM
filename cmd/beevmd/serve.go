@@ -17,7 +17,16 @@ import (
 	"github.com/om8P/BeeVM/internal/codestore"
 	"github.com/om8P/BeeVM/internal/registry"
 	"github.com/om8P/BeeVM/internal/runner"
+	"github.com/om8P/BeeVM/internal/store"
 )
+
+// envOr returns the environment variable's value, or def if it is empty.
+func envOr(name, def string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return def
+}
 
 // openRegistry opens the database in BEEVM_HOME, creating the folder if needed.
 func openRegistry(home string) (*registry.Registry, error) {
@@ -33,6 +42,11 @@ func runServe(args []string) int {
 	addr := fs.String("addr", "127.0.0.1:8080", "address to listen on (localhost only by default)")
 	maxVMs := fs.Int("max-vms", 8, "most VMs running at the same time")
 	queueWait := fs.Duration("queue-wait", 5*time.Second, "how long a call waits for a free VM slot before getting 503")
+	// Artifact store (S3 API). Without a bucket, code stays on this node's disk only.
+	s3Bucket := fs.String("s3-bucket", os.Getenv("BEEVM_S3_BUCKET"), "S3 bucket for function code (env BEEVM_S3_BUCKET); empty = local disk only")
+	s3Endpoint := fs.String("s3-endpoint", os.Getenv("BEEVM_S3_ENDPOINT"), "S3 endpoint URL for MinIO etc. (env BEEVM_S3_ENDPOINT); empty = AWS S3")
+	s3Region := fs.String("s3-region", envOr("BEEVM_S3_REGION", "us-east-1"), "S3 region (env BEEVM_S3_REGION)")
+	s3PathStyle := fs.Bool("s3-path-style", os.Getenv("BEEVM_S3_ENDPOINT") != "", "use path-style S3 URLs (needed for MinIO; default on when an endpoint is set)")
 	_ = fs.Parse(args)
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -48,6 +62,26 @@ func runServe(args []string) int {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
+	}
+
+	if *s3Bucket == "" {
+		logger.Warn("no S3 bucket configured: function code is stored on this node only (set BEEVM_S3_BUCKET to use an artifact store)")
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		blobs, err := store.NewS3(ctx, store.S3Config{
+			Bucket: *s3Bucket, Region: *s3Region, Endpoint: *s3Endpoint, PathStyle: *s3PathStyle,
+		})
+		if err == nil {
+			err = blobs.EnsureBucket(ctx)
+		}
+		cancel()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error: artifact store:", err)
+			fmt.Fprintln(os.Stderr, "(is MinIO running, and are AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY set? see deploy/minio.env)")
+			return 1
+		}
+		code.WithRemote(blobs)
+		logger.Info("artifact store ready", "bucket", *s3Bucket, "endpoint", *s3Endpoint, "region", *s3Region)
 	}
 
 	// The server has its own VM folder. Anything in it is left over from a crashed run (this is

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -59,9 +60,25 @@ func (s *Server) invoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	codePath, err := s.Code.Path(f.CodeSHA256)
+	// Local cache first; on a miss the code is downloaded from the artifact store.
+	fetchStart := time.Now()
+	codePath, cacheHit, err := s.Code.Ensure(r.Context(), f.CodeSHA256)
+	fetchMS := time.Since(fetchStart).Milliseconds()
+	if cacheHit {
+		fetchMS = 0
+	}
+	info := infoFrom(r.Context())
+	info.cache = "hit"
+	if !cacheHit {
+		info.cache = "miss"
+	}
+	info.fetchMS = fetchMS
 	if err != nil {
-		s.Logger.Error("code missing for deployed function", "function", f.Name, "error", err)
+		if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
+			w.WriteHeader(statusClientClosed)
+			return
+		}
+		s.Logger.Error("cannot get code for deployed function", "function", f.Name, "sha", f.CodeSHA256, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -70,7 +87,7 @@ func (s *Server) invoke(w http.ResponseWriter, r *http.Request) {
 		CodePath: codePath, Payload: payload,
 		MemoryMiB: f.MemoryMiB, VCPUs: f.VCPUs, TimeoutMS: f.TimeoutMS,
 	})
-	infoFrom(r.Context()).vmID = res.VMID
+	info.vmID = res.VMID
 	switch {
 	case errors.Is(err, runner.ErrBusy):
 		w.Header().Set("Retry-After", "1")
@@ -91,6 +108,8 @@ func (s *Server) invoke(w http.ResponseWriter, r *http.Request) {
 	h.Set(apitypes.HeaderBootMS, strconv.FormatInt(res.BootMS, 10))
 	h.Set(apitypes.HeaderFunctionMS, strconv.FormatInt(res.FunctionMS, 10))
 	h.Set(apitypes.HeaderTotalMS, strconv.FormatInt(res.TotalMS, 10))
+	h.Set(apitypes.HeaderCodeCache, info.cache)
+	h.Set(apitypes.HeaderFetchMS, strconv.FormatInt(fetchMS, 10))
 
 	if res.FunctionError != "" {
 		code := res.ExitCode
