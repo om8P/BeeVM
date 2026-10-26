@@ -13,7 +13,9 @@ It grows with the project: each finished milestone adds a section. The reasons b
 | Part 3: Milestone 1, a hand-booted MicroVM | Done |
 | Part 4: Milestone 2, boot and stop a VM from Go | Done |
 | Part 5: Milestone 3, guest agent over vsock, first function runs | Done |
-| Part 6: the repository, GitHub and renames | Done |
+| Part 6: Milestone 4, HTTP API, registry and CLI | Done |
+| Part 7: Milestone 5, artifact store with MinIO / S3 | Done |
+| Part 8: the repository, GitHub and renames | Done |
 | Appendices: cheat sheet, versions, numbers, troubleshooting, regenerating these documents | — |
 
 ---
@@ -36,7 +38,10 @@ Every step in order. Each one is explained in the parts below.
 | 10 | WSL | `make boot-test` (milestone 1 check: PASS) | 3.4 |
 | 11 | WSL | `make build && ./bin/beevmd boot` (milestone 2: boot and stop from Go) | 4.4 |
 | 12 | WSL | `make examples && ./bin/beevmd invoke --code bin/functions/hello-go-binary --payload '{"name":"Om"}'` (milestone 3: run a function in a VM) | 5.6 |
-| 13 | WSL | `make test && make test-kvm` (all tests) | 4.4, 5.7 |
+| 13 | WSL | `./bin/beevmd tenant add acme`, then `./bin/beevmd serve` (milestone 4: the HTTP service; keep this terminal open) | 6.2 |
+| 14 | WSL, second terminal | `export BEEVM_API_KEY=<key>`, `./bin/beevm deploy hello bin/functions/hello-go-binary`, `./bin/beevm invoke hello --payload '{"name":"Om"}' -v` | 6.3 |
+| 15 | WSL, optional | Milestone 5: stop the server, run `make minio` in one terminal, then in another `set -a; . deploy/minio.env; set +a` and `./bin/beevmd serve`; deploy and invoke again | 7.3, 7.4 |
+| 16 | WSL | `make test && make test-kvm` (all tests; `make test-s3` too if MinIO is running) | 4.4, 5.7, 6.5, 7.5 |
 
 ---
 
@@ -118,7 +123,7 @@ Tell Git who you are (it is written into every commit, and is public on GitHub):
 
 ```bash
 git config --global user.name "Your Name"
-git config --global user.email "you@example.com"     # or GitHub's no-reply address, see Part 6.4
+git config --global user.email "you@example.com"     # or GitHub's no-reply address, see Part 8.4
 ```
 
 Everything else (Go, Firecracker, kernel, image) is installed by `make setup` in Part 3.
@@ -320,7 +325,7 @@ Already done in the repo; for a fresh clone you only need:
 make build         # downloads Go dependencies the first time, builds bin/beevmd
 ```
 
-For the record, the module was created with the commands below (it was first named after the old GitHub account; see Part 6.3 for the renames):
+For the record, the module was created with the commands below (it was first named after the old GitHub account; see Part 8.3 for the renames):
 
 ```bash
 go mod init github.com/om8P/BeeVM
@@ -616,11 +621,202 @@ The agent tests in real VMs check: 20 echo calls each get their own correct answ
 
 ---
 
-## Part 6: the repository, GitHub and renames
+## Part 6: Milestone 4, HTTP API, registry and CLI
+
+**Goal:** stop running functions by hand and offer them as a service. A user deploys a binary with a command, then calls it over HTTP with an API key, the way a real FaaS works. For now every call still boots a fresh VM (slow, about 2.5 s) and returns the right answer; snapshots (milestone 6) fix the speed.
+
+### 6.1 What was added
+
+| Package / file | What it holds |
+|---|---|
+| `internal/registry` | SQLite database (`beevm.db`): tenants, API keys (only the SHA-256 hash is stored), functions and their settings |
+| `internal/codestore` | Function binaries on disk, named by their own SHA-256 (identical bytes are stored once) |
+| `internal/api` | The HTTP server (chi router): deploy, list, get, delete, invoke, health; key check; request log |
+| `internal/runner` | The `Runner` interface and `ColdRunner`: boots one VM per call, limited to `--max-vms` at the same time |
+| `internal/apitypes`, `internal/apiclient` | Shared request/response types and the Go client the CLI uses |
+| `cmd/beevmd` | New commands `serve`, `tenant add\|ls`, `key add\|ls\|revoke` |
+| `cmd/beevm` | The user CLI: `deploy`, `invoke`, `ls`, `rm` |
+
+New dependencies: `go-chi/chi/v5` (router), `spf13/cobra` (CLI), `modernc.org/sqlite` (SQLite without CGO).
+
+### 6.2 Build and start the service
+
+```bash
+make build                    # bin/beevmd (server) and bin/beevm (user CLI)
+make examples                 # example functions in bin/functions/
+./bin/beevmd tenant add acme  # prints the API key ONCE; copy it
+./bin/beevmd serve            # http://127.0.0.1:8080, up to 8 VMs at once
+```
+
+- Tenants and keys are created on the server machine, not through the network, so there is no admin key that could leak.
+- Keys look like `bvm_` plus 43 random characters. Only their hash is stored, so a lost key cannot be recovered: make a new one with `beevmd key add acme` and revoke the old one with `beevmd key revoke <prefix>`.
+- Useful `serve` flags: `--addr`, `--max-vms`, `--queue-wait` (how long a call waits for a free VM slot before getting 503).
+
+### 6.3 Use it
+
+In a second WSL terminal:
+
+```bash
+export BEEVM_API_KEY=bvm_...            # the key printed above
+./bin/beevm deploy hello bin/functions/hello-go-binary
+./bin/beevm invoke hello --payload '{"name":"Om"}' -v
+./bin/beevm ls
+./bin/beevm rm hello
+```
+
+`deploy` also takes `--memory` (64 to 1024 MiB, default 128), `--vcpus` (1 to 4) and `--timeout` (up to 60 s, default 10 s). With curl:
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $BEEVM_API_KEY" -d '{"name":"Om"}' http://127.0.0.1:8080/invoke/hello
+```
+
+### 6.4 The API and its status codes
+
+| Request | Answer |
+|---|---|
+| `PUT /api/v1/functions/{name}` (multipart: `code` file + optional `config` JSON) | 201 created, 200 replaced; 400 not an ELF binary or bad settings; 413 too large |
+| `GET /api/v1/functions`, `GET /api/v1/functions/{name}` | the function(s) of **your** tenant only |
+| `DELETE /api/v1/functions/{name}` | 204 |
+| `POST /invoke/{name}` (body = JSON payload) | 200 + the function's output |
+| `GET /healthz` | 200, no key needed |
+
+Invoke answers: **200** output; **502** the function failed (the body has its exit code and stderr); **503** + `Retry-After` no VM slot free; **404** no such function; **400/413** bad or too large payload; **500** BeeVM itself failed (details only in the server log). Timings come back as headers: `X-BeeVM-Boot-Ms`, `X-BeeVM-Function-Ms`, `X-BeeVM-Total-Ms`, `X-BeeVM-Vm-Id`.
+
+- **401** without a valid key (with a `WWW-Authenticate` header). A revoked key stops working immediately.
+- Another tenant's function is **404, never 403**, so one tenant cannot even learn that a name exists.
+
+### 6.5 Tests
+
+```bash
+make test          # unit tests, no KVM: registry 12, codestore 5, api 15, client 7, runner 4, CLI 7, plus the older ones
+make test-kvm      # also boots VMs: deploy + invoke end to end, failing and slow functions, 5 parallel calls through 2 slots, 503 when busy
+```
+
+**Result:** all pass. One invoke over HTTP takes **2.5 to 2.6 s**: about 2.0 s of that is the VM booting, about 0.4 s is copying the 64 MB rootfs for this VM, and the function itself needs 9 to 18 ms. With 4 slots, 10 parallel calls finish in waves of 4 (about 2, 4 and 6 s). Ctrl-C on the server while a call runs lets that call finish; a second Ctrl-C stops waiting.
+
+### 6.6 Problems we hit and decisions to know about
+
+| Problem or decision | Why | What we did |
+|---|---|---|
+| Key prefix of 8 characters was too short to tell keys apart for revoking | Prefixes could collide | The prefix is now 12 characters (`bvm_` + 8) |
+| A client that hangs up has no response to receive | Nobody reads the answer | Logged as status 499; the call's VM is still cleaned up |
+| `beevmd serve` clears `run/serve/` when it starts | Anything there is left over from a crash | Assumes it is the only server using that folder |
+| Two deploys of identical code racing with a delete | Code could be removed just before the second deploy registers it | A tiny race, accepted for now |
+| Copying the rootfs for every call (about 0.4 s) | Each VM needs its own writable disk | Left for milestone 6 (read-only base plus overlay, or reflink) |
+
+---
+
+## Part 7: Milestone 5, artifact store with MinIO / S3
+
+**Goal:** function code lives in cloud-style object storage, as the case study asks. Deploy uploads it to a **bucket**; the node downloads it the first time a function runs and keeps a local copy keyed by its hash. Moving from a laptop MinIO to real AWS S3 is a configuration change only. The store is **optional**: with no bucket configured BeeVM behaves exactly like milestone 4.
+
+### 7.1 What was added
+
+| File | What it holds |
+|---|---|
+| `internal/store/store.go` | The `Blobs` interface: `Put`, `Get`, `Exists`, `Delete`. The rest of BeeVM only sees this |
+| `internal/store/s3.go` | The S3 version (aws-sdk-go-v2). Works for MinIO and AWS. `EnsureBucket` creates the bucket if it is missing |
+| `internal/store/mem.go` | An in-memory version for fast tests (can be told to fail, to simulate the store being down) |
+| `internal/codestore/codestore.go` | Now a **cache** in front of the store: `Publish`, `Ensure`, `Delete` |
+| `internal/api/functions.go`, `invoke.go` | Deploy publishes before registering; invoke calls `Ensure` and reports hit or miss |
+| `scripts/minio.sh`, `deploy/minio.env`, `deploy/docker-compose.yml` | A local MinIO server, two ways |
+| `Makefile` | `minio`, `minio-up`, `minio-down`, `test-s3` |
+
+New dependencies: `aws-sdk-go-v2` (config, credentials, `service/s3`), `golang.org/x/sync` (single-flight), and `gofakes3` (a fake S3 server inside the tests).
+
+### 7.2 How code moves
+
+```mermaid
+sequenceDiagram
+    participant U as beevm deploy
+    participant S as beevmd
+    participant C as local cache (functions/sha256)
+    participant B as bucket (S3 / MinIO)
+    U->>S: PUT /api/v1/functions/hello (binary)
+    S->>C: save while computing SHA-256
+    S->>B: exists? if not, upload (functions/sha256)
+    S->>S: register the function in SQLite
+    Note over S,B: upload happens BEFORE registering, so a registered function always has its code in the bucket
+    U->>S: POST /invoke/hello
+    S->>C: file there?
+    alt cache hit
+        C-->>S: path
+    else cache miss
+        S->>B: download
+        B-->>S: bytes
+        S->>S: check SHA-256 equals the name, then move into place
+    end
+    S->>S: boot VM, upload code to the agent, run (as in milestone 4)
+```
+
+- **Content-addressed:** the hash is both the file's name and its checksum. A cached file can therefore never be out of date, and a download is rejected unless its bytes match the hash.
+- **Single-flight:** if 10 calls to a cold function arrive together, one downloads and the others wait for the same result.
+- **If the store is down:** deploying new code answers **503** with `Retry-After` and registers nothing. Functions whose code is already cached keep working. If a bucket is configured but unreachable at start-up, `beevmd serve` refuses to start and says why.
+- **Delete / replace:** when no function uses a hash any more, it is removed from the bucket and the cache. Identical code deployed under two names is one object.
+
+### 7.3 Run a local MinIO
+
+MinIO is the S3-compatible server we use on the laptop. **Important:** in 2026 MinIO archived its open-source project and its download site now answers `410 Gone` for every community binary. So `make minio` **builds a pinned version from source** with Go (the first build takes a few minutes; Go's checksum database guarantees the source is unchanged). In the first WSL terminal:
+
+```bash
+make minio       # builds on first use, then runs in the foreground; Ctrl-C stops it
+```
+
+The S3 API is on port 9000 and a web console on http://127.0.0.1:9001 (user `beevmdev`, password `beevmdev-secret`: throw-away development credentials in `deploy/minio.env`).
+
+If you have Docker with Compose, `make minio-up` / `make minio-down` do the same with a container. Its image tag is the last one we know of and was **not tested** here (no Docker in our WSL); if the pull fails, use `make minio`.
+
+### 7.4 Use it
+
+In a second terminal, load the settings, then start the server and use it as in Part 6:
+
+```bash
+set -a; . deploy/minio.env; set +a     # sets the BEEVM_S3_* and AWS_* variables for this terminal
+./bin/beevmd serve                      # log says: artifact store ready
+```
+
+In a third terminal (with `BEEVM_API_KEY` set):
+
+```bash
+./bin/beevm deploy hello bin/functions/hello-go-binary     # also uploads to the bucket
+rm -f ~/.beevm/functions/*                                 # pretend this is a fresh node
+./bin/beevm invoke hello --payload '{"name":"Om"}' -v      # code cache: miss, fetch ~20 ms
+./bin/beevm invoke hello --payload '{"name":"Om"}' -v      # code cache: hit, fetch 0 ms
+```
+
+Settings (flags on `serve`, or the environment variables): `--s3-bucket` / `BEEVM_S3_BUCKET` (empty means local disk only), `--s3-endpoint` / `BEEVM_S3_ENDPOINT` (empty means real AWS), `--s3-region` / `BEEVM_S3_REGION`, `--s3-path-style` (on by default when an endpoint is set; MinIO needs it). **Credentials are never flags:** the AWS SDK reads `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (or `~/.aws`, or an instance role on EC2). To use real S3, leave the endpoint unset, set bucket and region, and provide real credentials.
+
+### 7.5 Tests
+
+```bash
+make test        # unit tests: store (5, against a fake S3 server inside the test), codestore (10 new), api (8 new)
+make test-s3     # the store tests again, against the real MinIO (start `make minio` first)
+make test-kvm    # all earlier milestone tests still pass
+```
+
+What the new tests prove: upload happens once for identical code; a miss downloads and the next call hits; a corrupted download is rejected and never cached; 10 parallel misses cause at most 2 downloads; deploy with the store down gives 503 and leaves nothing registered or cached; cached functions still run while the store is down; deleting a function removes the object only when nothing else uses it.
+
+**Checked by hand** with a real server and MinIO: deploy puts one object in the bucket; after wiping the cache the first invoke is a miss (18 ms fetch) and the second a hit; deploying the same code as a second function adds no object; removing both functions empties the bucket; with MinIO stopped, new deploys get 503 while cached functions still run; with no bucket set the server runs local-only and logs a warning.
+
+### 7.6 Problems we hit in milestone 5
+
+| Problem | Why | What we did |
+|---|---|---|
+| MinIO download returned `410 Gone` | MinIO archived its community releases in 2026 and removed the binaries | `scripts/minio.sh` builds the pinned source with `go install`; the version is `MINIO_GO_VERSION` in `scripts/common.sh` |
+| Fake-S3 test said `InvalidBucketName` | Bucket names must be lowercase letters, digits and `-`; the first test used the Go test name, which has capitals | Fixed bucket name `beevm-test` |
+| Decoding a response in a test failed with "read on closed response body" | The helper that checks the status code also closes the body | Decode first, check the status afterwards (a small helper does both) |
+| A path like `/mnt/c/...` passed to `wsl.exe` from Git Bash turned into `C:/Program Files/Git/mnt/...` | Git Bash rewrites anything that looks like a Unix path | Set `MSYS_NO_PATHCONV=1` when calling `wsl.exe` |
+| A missing S3 object looked like a generic error for HEAD requests | HEAD answers have no body, so only the status code is available | `isNotFound` checks several error shapes and codes |
+
+**Not done on purpose (later):** a size limit and eviction for the cache, retries with backoff for failed downloads, uploads that bypass the server (presigned URLs), backing up snapshots to S3 (milestone 6).
+
+---
+
+## Part 8: the repository, GitHub and renames
 
 What we did, so you can do the same for your own fork or a new repository.
 
-### 6.1 Create and publish the repository
+### 8.1 Create and publish the repository
 
 ```bash
 gh auth login                                   # once: log the GitHub CLI in
@@ -629,7 +825,7 @@ gh repo create <user>/beevm --public --source=. --remote=origin --push
 
 `gh repo create ... --source=. --push` creates the repository on GitHub, adds it as `origin` and pushes the current branch. We chose **public** so the group and graders can see it.
 
-### 6.2 Removing a file from history before going public
+### 8.2 Removing a file from history before going public
 
 The first commit contained the course case-study `.docx`. Deleting it in a new commit would still leave it in the history, visible to anyone. So, before the first push, we rewrote the local history:
 
@@ -661,7 +857,7 @@ flowchart LR
 - Git's own documentation now recommends `git filter-repo` for this job; `filter-branch` was enough for four local commits.
 - When you are sure you do not need it: `git branch -D backup-before-rewrite`.
 
-### 6.3 Renames: repository, module path, GitHub username
+### 8.3 Renames: repository, module path, GitHub username
 
 The Go module path is both the name in every `import` line and the address other people download the code from, so it should always match the repository.
 
@@ -673,12 +869,12 @@ The Go module path is both the name in every `import` line and the address other
 
 To find every old reference before a rename: `grep -rIl "old-name" --exclude-dir=.git --exclude-dir=node_modules .`
 
-### 6.4 Things to know about commits
+### 8.4 Things to know about commits
 
 - Commit author name and email come from `git config` and are **public** on GitHub. To hide your email, use GitHub's no-reply address: `git config --global user.email "<id>+<username>@users.noreply.github.com"`. Old commits keep the old values.
 - Every milestone ends with: tests pass, `docs/progress.md` updated, one commit.
 
-### 6.5 The documentation folders
+### 8.5 The documentation folders
 
 | Folder | For whom | In Git |
 |---|---|---|
@@ -686,7 +882,7 @@ To find every old reference before a rename: `grep -rIl "old-name" --exclude-dir
 | `developer-guide/` | people: this guide (`guide.md`, plus a Word copy) and the learning notes (`learning-notes.docx`) | yes, the documents only |
 | `developer-guide/tools/` | the scripts that generate the Word files | no (local only, see Appendix E) |
 
-### 6.6 Commit history on GitHub
+### 8.6 Commit history on GitHub
 
 | Commit | What |
 |---|---|
@@ -700,6 +896,9 @@ To find every old reference before a rename: `grep -rIl "old-name" --exclude-dir
 | `6a31586` | move the guide and learning notes to `developer-guide/` |
 | `7464297` | Milestone 3 |
 | `aded71e` | rename Go module to `github.com/om8P/BeeVM` |
+| `88fd5c5` | update guide and learning notes through milestone 3 |
+| `9d92a7f` | Milestone 4 |
+| `d91588c` | Milestone 5 |
 
 ---
 
@@ -715,11 +914,19 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 | `make images` / `make kernel` / `make rootfs` | (re)build guest images; `rootfs` also rebuilds the guest agent |
 | `make boot-test` | milestone 1 automatic boot check |
 | `make boot` | milestone 1 interactive VM (`reboot -f` to exit) |
-| `make build` | build `bin/beevmd` |
+| `make build` | build `bin/beevmd` (server) and `bin/beevm` (user CLI) |
 | `make examples` | build example functions into `bin/functions/` |
 | `./bin/beevmd boot [--hold D] [--keep-logs] [--mem N] [--vcpus N]` | milestone 2: boot, show console, stop |
 | `./bin/beevmd invoke --code F [--payload J] [--repeat N] [--timeout D] [--console] [--keep-logs]` | milestone 3: run a function in a VM |
-| `make test` / `make test-kvm` / `make vet` | Go tests and checks |
+| `./bin/beevmd tenant add <name>` / `tenant ls` | milestone 4: create a tenant (prints its API key once) |
+| `./bin/beevmd key add <tenant>` / `key ls` / `key revoke <prefix>` | milestone 4: manage API keys |
+| `./bin/beevmd serve [--addr A] [--max-vms N] [--queue-wait D] [--s3-*]` | milestone 4/5: run the HTTP service |
+| `./bin/beevm deploy <name> <binary> [--memory M] [--vcpus N] [--timeout D]` | upload a function (needs `BEEVM_API_KEY`) |
+| `./bin/beevm invoke <name> [--payload J \| --payload-file F] [-v]` | call a function; `-v` prints timings and code cache hit/miss |
+| `./bin/beevm ls` / `rm <name>` | list or delete your functions |
+| `make minio` / `make minio-up` / `make minio-down` | milestone 5: local S3 server (built from source) or via Docker Compose |
+| `set -a; . deploy/minio.env; set +a` | load the S3 settings and dev credentials into this terminal |
+| `make test` / `make test-kvm` / `make test-s3` / `make vet` | Go tests and checks (`test-s3` needs MinIO running) |
 | `make clean-images` | delete `~/.beevm/images` and `~/.beevm/run` |
 | `pgrep -a firecracker` | find leftover VMs |
 | `id` | check you are in the `kvm` group |
@@ -734,6 +941,12 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 | Alpine minirootfs | 3.24.3 | `scripts/common.sh` |
 | firecracker-go-sdk | main @ `6fb280e993d4` (Dec 2025) | `go.mod` |
 | mdlayher/vsock | v1.3.0 | `go.mod` |
+| go-chi/chi | v5.5.0 | `go.mod` |
+| spf13/cobra | v1.10.2 | `go.mod` |
+| modernc.org/sqlite | v1.61.0 | `go.mod` |
+| aws-sdk-go-v2 / service/s3 | v1.47.4 / v1.114.5 | `go.mod` |
+| gofakes3 (tests only) | v1.2.0 | `go.mod` |
+| MinIO (built from source) | pseudo-version `v0.0.0-20260212201848-7aac2a2c5b7c` | `scripts/common.sh` |
 | Guest agent | 0.1.0 | `cmd/beevm-agent/main.go` |
 | Host | Windows 11, WSL2 Ubuntu 24.04.3, WSL kernel 6.6.87 | — |
 
@@ -750,6 +963,9 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 | Function call round trip, warm (median) | 4 to 5 ms | 3 |
 | Function call round trip, first call | ~11 ms | 3 |
 | Guest agent binary / rootfs on disk | 6.8 MB / 20 MB | 3 |
+| One invoke over HTTP (boot a VM per call) | 2.5 to 2.6 s | 4 |
+| Copying the rootfs for each call | ~0.4 s | 4 |
+| Function code fetch from MinIO (cache miss) | ~18 ms | 5 |
 | `make setup` re-run when all done | 0.6 s | 1 |
 | Target cold start (snapshot restore) | < 50 ms | 6 (to do) |
 
@@ -761,7 +977,10 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 4. **Stale guest agent?** `make images` after changing anything in `cmd/beevm-agent` or `internal/agent`.
 5. **Start clean:** `make clean-images && make setup`.
 6. **Leftover processes:** `pgrep -a firecracker`, then `kill <pid>`; leftover folders: `rm -rf ~/.beevm/run/vms/*`.
-7. **Running commands from Windows tools into WSL:** put them in a script file and run `wsl.exe -- bash file.sh`, or use `make`; inline `$VARS`, quotes and `|` get mangled.
+7. **Server will not start with an S3 error:** is MinIO running (`make minio`), and did you load `deploy/minio.env` in *this* terminal? Unset `BEEVM_S3_BUCKET` to run without an artifact store.
+8. **Deploy answers 503 `artifact store unavailable`:** the bucket cannot be reached; start MinIO or fix the endpoint and credentials. Already cached functions keep working.
+9. **`make minio` fails to build:** it needs Go and internet access the first time; the MinIO download site no longer serves binaries (410 Gone), which is why it builds from source.
+10. **Running commands from Windows tools into WSL:** put them in a script file and run `wsl.exe -- bash file.sh`, or use `make`; inline `$VARS`, quotes and `|` get mangled. From Git Bash also set `MSYS_NO_PATHCONV=1`, or `/mnt/c/...` paths are rewritten.
 
 ## Appendix E: regenerating these documents
 
