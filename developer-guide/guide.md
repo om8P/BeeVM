@@ -15,7 +15,8 @@ It grows with the project: each finished milestone adds a section. The reasons b
 | Part 5: Milestone 3, guest agent over vsock, first function runs | Done |
 | Part 6: Milestone 4, HTTP API, registry and CLI | Done |
 | Part 7: Milestone 5, artifact store with MinIO / S3 | Done |
-| Part 8: the repository, GitHub and renames | Done |
+| Part 8: Milestone 6, snapshots and fast restore | Done |
+| Part 9: the repository, GitHub and renames | Done |
 | Appendices: cheat sheet, versions, numbers, troubleshooting, regenerating these documents | — |
 
 ---
@@ -41,7 +42,8 @@ Every step in order. Each one is explained in the parts below.
 | 13 | WSL | `./bin/beevmd tenant add acme`, then `./bin/beevmd serve` (milestone 4: the HTTP service; keep this terminal open) | 6.2 |
 | 14 | WSL, second terminal | `export BEEVM_API_KEY=<key>`, `./bin/beevm deploy hello bin/functions/hello-go-binary`, `./bin/beevm invoke hello --payload '{"name":"Om"}' -v` | 6.3 |
 | 15 | WSL, optional | Milestone 5: stop the server, run `make minio` in one terminal, then in another `set -a; . deploy/minio.env; set +a` and `./bin/beevmd serve`; deploy and invoke again | 7.3, 7.4 |
-| 16 | WSL | `make test && make test-kvm` (all tests; `make test-s3` too if MinIO is running) | 4.4, 5.7, 6.5, 7.5 |
+| 16 | WSL | Milestone 6: `make images build`, then `./bin/beevmd invoke --restore --code bin/functions/hello-go-binary` and `./bin/beevmd bench coldstart --runs 100` (boot vs restore) | 8.6, 8.7 |
+| 17 | WSL | `make test && make test-kvm` (all tests; `make test-s3` too if MinIO is running) | 4.4, 5.7, 6.5, 7.5, 8.8 |
 
 ---
 
@@ -123,7 +125,7 @@ Tell Git who you are (it is written into every commit, and is public on GitHub):
 
 ```bash
 git config --global user.name "Your Name"
-git config --global user.email "you@example.com"     # or GitHub's no-reply address, see Part 8.4
+git config --global user.email "you@example.com"     # or GitHub's no-reply address, see Part 9.4
 ```
 
 Everything else (Go, Firecracker, kernel, image) is installed by `make setup` in Part 3.
@@ -325,7 +327,7 @@ Already done in the repo; for a fresh clone you only need:
 make build         # downloads Go dependencies the first time, builds bin/beevmd
 ```
 
-For the record, the module was created with the commands below (it was first named after the old GitHub account; see Part 8.3 for the renames):
+For the record, the module was created with the commands below (it was first named after the old GitHub account; see Part 9.3 for the renames):
 
 ```bash
 go mod init github.com/om8P/BeeVM
@@ -812,11 +814,162 @@ What the new tests prove: upload happens once for identical code; a miss downloa
 
 ---
 
-## Part 8: the repository, GitHub and renames
+## Part 8: Milestone 6, snapshots and fast restore
+
+**Goal:** the cold start under 50 ms that the case study grades. Instead of booting a new VM for every call (about 1 s), BeeVM boots one VM once, freezes it to disk as a **snapshot**, and then starts every call's VM by **restoring** a copy of that frozen VM. The guest kernel has already booted and the agent is already listening, so the VM is ready in about 47 ms.
+
+### 8.1 What a snapshot is
+
+A Firecracker snapshot is two files:
+
+| File | What it holds | Size |
+|---|---|---|
+| `mem` | the guest's whole RAM at the moment of the snapshot | as large as the VM's memory (128 MiB) |
+| `vmstate` | CPU registers and the state of every device (disk, vsock, serial port) | a few KB |
+
+Restoring means starting a new Firecracker process and telling it to load those two files and continue (`PUT /snapshot/load`). Firecracker does not read the whole 128 MiB first: it **maps** the memory file into the VM (`mmap`, private and copy-on-write). A page is read only when the guest touches it, and many VMs restored from the same file share the pages they only read.
+
+We use one **base snapshot**: a VM that has booted, started its agent and settled, with no function loaded yet. Per-function snapshots (code already inside) come in milestone 8.
+
+### 8.2 What was added
+
+| File | What it holds |
+|---|---|
+| `internal/vmm/config.go`, `vm.go` | `SharedRootfs` (one read-only disk for all VMs, no copy); Firecracker runs inside the VM folder; the vsock socket is the relative path `v.sock`; `Pause`, `CreateSnapshot`, `StartedAt` |
+| `internal/vmm/restore.go` | `vmm.Restore`: start Firecracker, load the snapshot, return a normal `*VM` with timings (`Spawn`, `Load`) |
+| `internal/vmm/fcapi.go` | A minimal client for Firecracker's API socket (polls every 1 ms) |
+| `internal/agent/resume.go` | New agent endpoint `POST /resume`: set the clock, mix in fresh randomness |
+| `internal/snapshot/` | The Snapshot Manager: keys, building, listing, removing |
+| `internal/runner/runner.go` | `SnapshotRunner` (the new default) next to `ColdRunner`; a shared VM-slot limiter |
+| `cmd/beevmd/snapshotcmd.go`, `bench.go` | `beevmd snapshot ...` and `beevmd bench coldstart` |
+| `guest/rootfs/init` | `/tmp` is now RAM too (the root disk is read-only) |
+| `examples/functions/testfn` | New modes `readfile`, `writefile`, `time`, `random` (used by the tests) |
+
+No new libraries.
+
+### 8.3 Four problems a snapshot brings, and how we solved them
+
+**1. Paths are stored inside the snapshot.** Firecracker remembers the disk's path and the vsock socket's path. A restored VM lives in a new folder, so an absolute socket path would point at the folder of the VM that was snapshotted. Fix: start every Firecracker process *inside* its VM folder (`cmd.Dir`) and give it the socket as the relative name `v.sock`. Each restored VM then creates `v.sock` in its own folder.
+
+**2. The per-VM disk copy.** Until now every VM got its own copy of the 64 MB root filesystem (about 0.4 s), and the snapshot stores the disk path. Fix: all VMs share **one read-only** root disk. Firecracker tells the kernel to mount it read-only (`ro`), and the init script mounts RAM filesystems on `/run` (the uploaded function) and `/tmp` (anything a function writes). This also made normal boots 0.4 s faster.
+
+**3. Restored VMs are clones.** Every restored VM starts as an exact copy of one moment in the past:
+- its **clock** is behind (it stood still while the snapshot sat on disk; we measured 3 to 9 s);
+- its **random-number generator** is in the same state in every copy, which is dangerous for anything that needs secret random numbers.
+
+Fix: right after a restore the host calls the agent's `POST /resume` with the host's current time and 64 fresh random bytes. The agent sets the clock and gives the bytes to the kernel (`RNDADDENTROPY`), then forces the kernel to rebuild its generator from them (`RNDRESEEDCRNG`). Newer systems can do this automatically with a "VM generation ID" device, but it is not active in our guest, so we do it ourselves.
+
+**4. Open connections do not survive.** A vsock connection that was open at snapshot time is broken after a restore. Fix: the builder closes the host's connection to the agent before pausing, and each restored VM gets a fresh client. The agent's *listening* socket survives, so the host simply connects again.
+
+### 8.4 How a restored call flows
+
+```mermaid
+sequenceDiagram
+    participant R as SnapshotRunner
+    participant M as Snapshot Manager
+    participant F as firecracker (new process)
+    participant A as agent (inside the restored VM)
+    R->>M: Ensure(128 MiB, 1 vCPU)
+    M-->>R: snapshots/<key>/{vmstate, mem}  (built once, then reused)
+    R->>F: start in the VM folder (~1.4 ms)
+    R->>F: PUT /snapshot/load, resume_vm  (~24 ms)
+    F->>A: vCPUs continue where the snapshot was paused
+    R->>A: GET /health over vsock (polled every 1 ms)
+    R->>A: POST /resume {time, random bytes}
+    Note over R,A: VM ready: about 47 ms after the start
+    R->>A: PUT /function, POST /invoke (as before)
+    R->>F: kill, delete the folder
+```
+
+### 8.5 The Snapshot Manager
+
+A snapshot only fits the exact kernel, root filesystem, Firecracker version, memory size, vCPU count and boot arguments it was made with. All of these go into a hash, the snapshot's **key**, and the files live in `~/.beevm/snapshots/<key>/`. After `make images` the rootfs hash changes, so the key changes, so a new snapshot is built automatically; the old one is listed as stale.
+
+Building (about 2.1 to 2.5 s): boot a VM in agent mode, wait for the agent, **wait 1 more second** (see 8.9), close connections, pause, write the snapshot into `tmp-<random>/`, write `meta.json`, then rename the folder to its key. A half-built snapshot is therefore never used. Ten callers asking for the same missing snapshot share one build.
+
+### 8.6 Use it
+
+```bash
+make images build examples           # images: the new init and agent are needed
+./bin/beevmd snapshot build          # optional: serve builds it at start-up anyway
+./bin/beevmd snapshot ls
+./bin/beevmd invoke --restore --code bin/functions/hello-go-binary --payload '{"name":"Om"}'
+```
+
+```text
+KEY                   MEMORY   VCPUS  SIZE     BUILD    CREATED              STATUS
+ffb9d10f5e4ff9ed3c0a  128 MiB  1      128 MiB  2322 ms  2026-10-26 23:41:48  current
+
+== restored VM 5770554d from snapshot ffb9d10f5e4ff9ed3c0a (1 vCPU, 128 MiB): process 1.3ms, load 19.7ms
+== agent ready after 43.7ms (guest clock moved 8688 ms forward)
+#1 {"greeting":"Hello, Om!","runtime":"binary"}  (15ms in function, 18.3ms round trip)
+```
+
+The service uses snapshots by default. With the server running (`./bin/beevmd serve`, as in Part 6):
+
+```bash
+./bin/beevm invoke hello --payload '{"name":"Om"}' -v
+```
+
+```text
+vm 6b88505b: restore 52 ms, upload 20 ms, function 12 ms, server total 136 ms, round trip 140 ms
+```
+
+`./bin/beevmd serve --runner cold` brings back a full boot per call (`boot 906 ms ... server total 997 ms`) for comparison. Other commands: `beevmd snapshot rm <key>` and `beevmd snapshot rm --stale`. The new response header `X-BeeVM-Start` says `restore` or `boot`, and `X-BeeVM-Upload-Ms` gives the code upload time.
+
+### 8.7 Measure it: the cold-start benchmark
+
+```bash
+./bin/beevmd bench coldstart --runs 100
+```
+
+It runs 1 warm-up and 100 measured cold starts per mode, one at a time, and prints percentiles. **p50** is the median (half the runs were faster); **p99** means 99 of 100 runs were at least this fast, which shows the bad cases. Results on the project laptop (WSL2, 1 vCPU, 128 MiB, page cache warm):
+
+| ms | p50 | p90 | p99 | max |
+|---|---|---|---|---|
+| boot: VM ready | 936.8 | 1020.8 | 1186.1 | 1350.0 |
+| boot: first response | 955.8 | 1077.3 | 1213.9 | 1393.9 |
+| restore: start process | 1.4 | 2.0 | 2.9 | 5.0 |
+| restore: load snapshot | 23.8 | 32.4 | 38.0 | 39.6 |
+| **restore: VM ready** | **47.0** | 55.3 | **59.1** | 63.8 |
+| restore: upload 2.5 MB | 27.6 | 33.0 | 79.7 | 85.1 |
+| restore: invoke | 15.2 | 16.4 | 17.3 | 17.9 |
+| restore: first response | 91.0 | 100.1 | 138.0 | 149.9 |
+
+Restore is about **20 times faster** than boot. The median is under 50 ms; p99 (59 ms) is not, on WSL2's nested virtualization. Loading the snapshot is the largest part. The raw data and a summary go to `bench/results/` (not committed).
+
+Notice that the upload and the call are slower after a restore (28 and 15 ms) than after a boot (15 and 3 ms): the guest's memory is loaded lazily, so the first touch of each page costs a read from the snapshot file. Milestones 7 (warm VMs) and 8 (function snapshots) attack exactly this.
+
+### 8.8 Tests
+
+```bash
+make test        # new: snapshot manager (8), snapshot runner (4), agent /resume (3), benchmark maths (2), API headers
+make test-kvm    # new: restore runs functions (10 restores), 5 parallel restores from one snapshot,
+                 #      clock correct + clones differ + read-only root, real manager build, API end to end with snapshots
+```
+
+The tests prove: restored VMs answer correctly; parallel restores share one memory file; after `/resume` the guest clock is within 1 s of the host and two clones produce different random bytes; writing to `/` fails while `/tmp` works and is private per VM; a changed rootfs means a new snapshot; a failed build leaves nothing behind and the runner falls back to booting. All earlier tests still pass.
+
+### 8.9 Problems we hit in milestone 6
+
+| Problem | Why | What we did |
+|---|---|---|
+| The first answer after a restore took about 850 ms (sometimes 15 ms) | The snapshot was taken right after the agent started, while the guest was still finishing start-up work; that unfinished work was frozen into every copy. The vsock connection itself took only ~6 ms | Measured settle times from 0 to 2 s: 0.5 s or more fixes it. The builder waits 1 s before snapshotting |
+| Diagnostic test dialled the wrong socket | The config had no VM ID yet; `Restore` picks a random one | Use the VM's own folder |
+| The SDK's snapshot loading did not fit | It still sets up vsock (Firecracker refuses configuration before a load) and checks for the API socket only every 10 ms | A small own API client for restore (`fcapi.go`), polling every 1 ms |
+| The guest clock was seconds behind after restore | A snapshot freezes the clock | `POST /resume` sets it |
+| No VM generation ID in the guest | The driver is in the kernel, but no device is active | The host sends fresh random bytes; the agent forces a reseed |
+| Go strings in edited files got broken line breaks | The tool that ran our edit scripts rewrote `\n` escapes | Edits with escapes are made with a normal editor |
+
+**Not done on purpose (later):** per-function snapshots (M8), the warm pool (M7), backing snapshots up to S3, tuning the snapshot load (smaller memory, hugepages, measuring with a cold page cache and on a cloud machine without nested virtualization).
+
+---
+
+## Part 9: the repository, GitHub and renames
 
 What we did, so you can do the same for your own fork or a new repository.
 
-### 8.1 Create and publish the repository
+### 9.1 Create and publish the repository
 
 ```bash
 gh auth login                                   # once: log the GitHub CLI in
@@ -825,7 +978,7 @@ gh repo create <user>/beevm --public --source=. --remote=origin --push
 
 `gh repo create ... --source=. --push` creates the repository on GitHub, adds it as `origin` and pushes the current branch. We chose **public** so the group and graders can see it.
 
-### 8.2 Removing a file from history before going public
+### 9.2 Removing a file from history before going public
 
 The first commit contained the course case-study `.docx`. Deleting it in a new commit would still leave it in the history, visible to anyone. So, before the first push, we rewrote the local history:
 
@@ -857,7 +1010,7 @@ flowchart LR
 - Git's own documentation now recommends `git filter-repo` for this job; `filter-branch` was enough for four local commits.
 - When you are sure you do not need it: `git branch -D backup-before-rewrite`.
 
-### 8.3 Renames: repository, module path, GitHub username
+### 9.3 Renames: repository, module path, GitHub username
 
 The Go module path is both the name in every `import` line and the address other people download the code from, so it should always match the repository.
 
@@ -869,12 +1022,12 @@ The Go module path is both the name in every `import` line and the address other
 
 To find every old reference before a rename: `grep -rIl "old-name" --exclude-dir=.git --exclude-dir=node_modules .`
 
-### 8.4 Things to know about commits
+### 9.4 Things to know about commits
 
 - Commit author name and email come from `git config` and are **public** on GitHub. To hide your email, use GitHub's no-reply address: `git config --global user.email "<id>+<username>@users.noreply.github.com"`. Old commits keep the old values.
 - Every milestone ends with: tests pass, `docs/progress.md` updated, one commit.
 
-### 8.5 The documentation folders
+### 9.5 The documentation folders
 
 | Folder | For whom | In Git |
 |---|---|---|
@@ -882,7 +1035,7 @@ To find every old reference before a rename: `grep -rIl "old-name" --exclude-dir
 | `developer-guide/` | people: this guide (`guide.md`, plus a Word copy) and the learning notes (`learning-notes.docx`) | yes, the documents only |
 | `developer-guide/tools/` | the scripts that generate the Word files | no (local only, see Appendix E) |
 
-### 8.6 Commit history on GitHub
+### 9.6 Commit history on GitHub
 
 | Commit | What |
 |---|---|
@@ -899,6 +1052,9 @@ To find every old reference before a rename: `grep -rIl "old-name" --exclude-dir
 | `88fd5c5` | update guide and learning notes through milestone 3 |
 | `9d92a7f` | Milestone 4 |
 | `d91588c` | Milestone 5 |
+| `afd078b` | update guide and learning notes through milestone 5 |
+| `1488561` | demonstration script for milestones 1 to 5 |
+| `56d718e` | Milestone 6 |
 
 ---
 
@@ -917,10 +1073,12 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 | `make build` | build `bin/beevmd` (server) and `bin/beevm` (user CLI) |
 | `make examples` | build example functions into `bin/functions/` |
 | `./bin/beevmd boot [--hold D] [--keep-logs] [--mem N] [--vcpus N]` | milestone 2: boot, show console, stop |
-| `./bin/beevmd invoke --code F [--payload J] [--repeat N] [--timeout D] [--console] [--keep-logs]` | milestone 3: run a function in a VM |
+| `./bin/beevmd invoke --code F [--payload J] [--repeat N] [--timeout D] [--console] [--keep-logs] [--restore]` | milestone 3: run a function in a VM (`--restore`: from the base snapshot, milestone 6) |
+| `./bin/beevmd snapshot build [--mem N --vcpus N]` / `ls` / `rm <key>` / `rm --stale` | milestone 6: manage base snapshots |
+| `./bin/beevmd bench coldstart [--runs N] [--mode boot,restore]` | milestone 6: p50/p90/p99 of boot vs restore, saved to `bench/results/` |
 | `./bin/beevmd tenant add <name>` / `tenant ls` | milestone 4: create a tenant (prints its API key once) |
 | `./bin/beevmd key add <tenant>` / `key ls` / `key revoke <prefix>` | milestone 4: manage API keys |
-| `./bin/beevmd serve [--addr A] [--max-vms N] [--queue-wait D] [--s3-*]` | milestone 4/5: run the HTTP service |
+| `./bin/beevmd serve [--addr A] [--max-vms N] [--queue-wait D] [--s3-*] [--runner snapshot\|cold]` | milestone 4/5/6: run the HTTP service (restores from snapshots by default) |
 | `./bin/beevm deploy <name> <binary> [--memory M] [--vcpus N] [--timeout D]` | upload a function (needs `BEEVM_API_KEY`) |
 | `./bin/beevm invoke <name> [--payload J \| --payload-file F] [-v]` | call a function; `-v` prints timings and code cache hit/miss |
 | `./bin/beevm ls` / `rm <name>` | list or delete your functions |
@@ -966,8 +1124,13 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 | One invoke over HTTP (boot a VM per call) | 2.5 to 2.6 s | 4 |
 | Copying the rootfs for each call | ~0.4 s | 4 |
 | Function code fetch from MinIO (cache miss) | ~18 ms | 5 |
+| Cold boot without the rootfs copy, VM ready (p50 / p99 of 100) | 937 / 1186 ms | 6 |
+| **Snapshot restore, VM ready (p50 / p99 of 100)** | **47 / 59 ms** | 6 |
+| Snapshot restore, first response incl. upload (p50 / p99) | 91 / 138 ms | 6 |
+| One invoke over HTTP with snapshot restore | ~130 to 160 ms | 6 |
+| Building a base snapshot (incl. 1 s settle) | 2.1 to 2.5 s | 6 |
 | `make setup` re-run when all done | 0.6 s | 1 |
-| Target cold start (snapshot restore) | < 50 ms | 6 (to do) |
+| Target cold start (snapshot restore) | < 50 ms: p50 met, p99 not yet on WSL2 | 6 |
 
 ## Appendix D: general troubleshooting
 
@@ -980,7 +1143,8 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 7. **Server will not start with an S3 error:** is MinIO running (`make minio`), and did you load `deploy/minio.env` in *this* terminal? Unset `BEEVM_S3_BUCKET` to run without an artifact store.
 8. **Deploy answers 503 `artifact store unavailable`:** the bucket cannot be reached; start MinIO or fix the endpoint and credentials. Already cached functions keep working.
 9. **`make minio` fails to build:** it needs Go and internet access the first time; the MinIO download site no longer serves binaries (410 Gone), which is why it builds from source.
-10. **Running commands from Windows tools into WSL:** put them in a script file and run `wsl.exe -- bash file.sh`, or use `make`; inline `$VARS`, quotes and `|` get mangled. From Git Bash also set `MSYS_NO_PATHCONV=1`, or `/mnt/c/...` paths are rewritten.
+10. **Restored calls are slow (hundreds of ms) or the server logs "snapshot unavailable, booting instead":** run `./bin/beevmd snapshot build` to see the error; after changing guest code run `make images` (the snapshot is rebuilt automatically; `beevmd snapshot rm --stale` cleans up old ones).
+11. **Running commands from Windows tools into WSL:** put them in a script file and run `wsl.exe -- bash file.sh`, or use `make`; inline `$VARS`, quotes and `|` get mangled. From Git Bash also set `MSYS_NO_PATHCONV=1`, or `/mnt/c/...` paths are rewritten.
 
 ## Appendix E: regenerating these documents
 
