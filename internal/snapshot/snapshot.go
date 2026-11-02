@@ -42,7 +42,15 @@ type Inputs struct {
 	BootArgs           string `json:"boot_args"`
 	MemMiB             int64  `json:"mem_mib"`
 	VCPUs              int64  `json:"vcpus"`
+	BuildVersion       int    `json:"build_version"` // how the snapshot is made (see BuildVersion)
 }
+
+// BuildVersion numbers the way buildVM prepares a VM before snapshotting it. Bump it when that
+// changes: older snapshots then no longer match and are rebuilt (and removed as stale).
+//
+//	1  boot, wait for the agent, settle, snapshot (M6)
+//	2  also call /resume once before settling, so that code path is in guest memory (M6 refine)
+const BuildVersion = 2
 
 // Key is a short, stable name for a set of inputs.
 func Key(in Inputs) string {
@@ -127,6 +135,11 @@ func New(dir string, base vmm.Config, logf func(string, ...any)) (*Manager, erro
 	return m, nil
 }
 
+// SetSettle changes how long a VM runs before it is snapshotted (for experiments; the
+// default is DefaultSettle). The settle time is not part of the key, so use a separate
+// folder for snapshots built with a different value.
+func (m *Manager) SetSettle(d time.Duration) { m.settle = d }
+
 // Dir returns the folder that holds the snapshots.
 func (m *Manager) Dir() string { return m.dir }
 
@@ -152,6 +165,7 @@ func (m *Manager) Inputs(memMiB, vcpus int64) (Inputs, error) {
 	return Inputs{
 		FirecrackerVersion: m.version, KernelSHA256: kernel, RootfsSHA256: rootfs,
 		RootfsPath: m.base.RootfsPath, BootArgs: BootArgs, MemMiB: memMiB, VCPUs: vcpus,
+		BuildVersion: BuildVersion,
 	}, nil
 }
 
@@ -275,6 +289,11 @@ func (m *Manager) buildVM(ctx context.Context, cfg vmm.Config, dir string) error
 	}
 	if _, err := vm.WaitForAgent(ctx); err != nil {
 		return err
+	}
+	// Make the call every restore starts with once now. Its code is then already read from
+	// the disk image into guest memory, so a restored VM does not have to read it first.
+	if _, err := vm.Agent().Resume(ctx); err != nil {
+		return fmt.Errorf("warm up agent: %w", err)
 	}
 	select {
 	case <-time.After(m.settle):

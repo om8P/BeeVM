@@ -81,6 +81,23 @@ func Restore(ctx context.Context, cfg Config, snap SnapshotFiles) (*VM, RestoreT
 	}
 	tm.Spawn = time.Since(t0)
 
+	if len(cfg.CPUs) > 0 {
+		// Pin the threads that exist now; the vCPU thread is created during the load and
+		// inherits the setting.
+		if err := pinProcess(cmd.Process.Pid, cfg.CPUs); err != nil {
+			return fail(err)
+		}
+	}
+
+	if cfg.FirecrackerMetrics {
+		if err := os.WriteFile(cfg.MetricsPath(), nil, 0o600); err != nil {
+			return fail(err)
+		}
+		if err := api.put(ctx, "/metrics", map[string]string{"metrics_path": cfg.MetricsPath()}); err != nil {
+			return fail(err)
+		}
+	}
+
 	t1 := time.Now()
 	if err := api.loadSnapshot(ctx, snap.StatePath, snap.MemPath); err != nil {
 		return fail(fmt.Errorf("load snapshot: %w", err))

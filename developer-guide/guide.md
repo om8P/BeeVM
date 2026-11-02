@@ -15,7 +15,7 @@ It grows with the project: each finished milestone adds a section. The reasons b
 | Part 5: Milestone 3, guest agent over vsock, first function runs | Done |
 | Part 6: Milestone 4, HTTP API, registry and CLI | Done |
 | Part 7: Milestone 5, artifact store with MinIO / S3 | Done |
-| Part 8: Milestone 6, snapshots and fast restore | Done |
+| Part 8: Milestone 6, snapshots and fast restore | Done, refined (8.10) |
 | Part 9: the repository, GitHub and renames | Done |
 | Appendices: cheat sheet, versions, numbers, troubleshooting, regenerating these documents | — |
 
@@ -885,7 +885,7 @@ sequenceDiagram
 
 A snapshot only fits the exact kernel, root filesystem, Firecracker version, memory size, vCPU count and boot arguments it was made with. All of these go into a hash, the snapshot's **key**, and the files live in `~/.beevm/snapshots/<key>/`. After `make images` the rootfs hash changes, so the key changes, so a new snapshot is built automatically; the old one is listed as stale.
 
-Building (about 2.1 to 2.5 s): boot a VM in agent mode, wait for the agent, **wait 1 more second** (see 8.9), close connections, pause, write the snapshot into `tmp-<random>/`, write `meta.json`, then rename the folder to its key. A half-built snapshot is therefore never used. Ten callers asking for the same missing snapshot share one build.
+Building (about 2.1 to 2.5 s): boot a VM in agent mode, wait for the agent, call `/resume` once (since the M6 refine), **wait 1 more second** (see 8.9), close connections, pause, write the snapshot into `tmp-<random>/`, write `meta.json`, then rename the folder to its key. A half-built snapshot is therefore never used. Ten callers asking for the same missing snapshot share one build.
 
 ### 8.6 Use it
 
@@ -958,10 +958,51 @@ The tests prove: restored VMs answer correctly; parallel restores share one memo
 | Diagnostic test dialled the wrong socket | The config had no VM ID yet; `Restore` picks a random one | Use the VM's own folder |
 | The SDK's snapshot loading did not fit | It still sets up vsock (Firecracker refuses configuration before a load) and checks for the API socket only every 10 ms | A small own API client for restore (`fcapi.go`), polling every 1 ms |
 | The guest clock was seconds behind after restore | A snapshot freezes the clock | `POST /resume` sets it |
-| No VM generation ID in the guest | The driver is in the kernel, but no device is active | The host sends fresh random bytes; the agent forces a reseed |
+| Restored copies share one random-number state | Every copy starts from the same frozen memory | The host sends fresh random bytes; the agent forces a reseed. (We first thought VM generation ID was not active; the M6 refine showed it is, see 8.10, so this is now a second safeguard) |
 | Go strings in edited files got broken line breaks | The tool that ran our edit scripts rewrote `\n` escapes | Edits with escapes are made with a normal editor |
 
-**Not done on purpose (later):** per-function snapshots (M8), the warm pool (M7), backing snapshots up to S3, tuning the snapshot load (smaller memory, hugepages, measuring with a cold page cache and on a cloud machine without nested virtualization).
+**Not done on purpose (later):** per-function snapshots (M8), the warm pool (M7), backing snapshots up to S3, tuning the snapshot load (smaller memory, hugepages, measuring with a cold page cache and on a cloud machine without nested virtualization). The tuning part was done in the M6 refine (8.10).
+
+### 8.10 Tuning the restore (M6 refine)
+
+Goal: bring restore p99 under 50 ms. Method: measure first, then change one thing at a time and run 100 restores per change.
+
+**Before you measure: Performance mode, plugged in.** In Legion Balance Mode on battery everything was about 2x slower (boot 1.84 s instead of 0.94 s), which would have made every comparison useless.
+
+New benchmark columns and flags:
+
+```bash
+./bin/beevmd bench coldstart --mode restore --fc-metrics          # + Firecracker's own load time
+./bin/beevmd bench coldstart --mode restore --probe health        # the old way, for comparison
+./bin/beevmd bench coldstart --mode restore --settle 2s --mem 64  # throw-away snapshot, other settings
+./bin/beevmd bench coldstart --mode boot,restore --cold-cache --runs 30
+```
+
+`agent` is the time from the end of the load until the agent answered `/resume`. `faults agent` and `faults call` count the page faults of the firecracker process: each one is the guest touching a page of its memory for the first time after the restore.
+
+**What the numbers showed** (p50 of ~46 ms in total):
+
+- **Spawn, 1.5 ms**: nothing to gain.
+- **Load, ~23 ms, varying from 10 to 35 ms**: Firecracker measures the same time itself, so it is not our HTTP request. Its debug log (`firecracker --level Trace`) puts it in "build microvm from snapshot", which sets up KVM. Under WSL2 that runs as a VM inside Hyper-V (*nested virtualization*), and the host's scheduling noise makes it vary. **This variance is the p99.**
+- **Agent, ~21 ms**: about 520 page faults at ~37 µs each. Firecracker maps the memory file *privately*: pages are loaded on first touch (*lazy loading*) and copied on first write (*copy-on-write*). Each first touch needs both hypervisors to fix up their page tables. Upload and call add about 1,470 faults more.
+
+**What we kept:**
+
+| Change | Effect (same conditions) |
+|---|---|
+| `VM.WaitAndResume`: send `/resume` straight away instead of `/health` first (one request instead of two) | agent p50 22-23 -> 21 ms, **p99 38-55 -> 24-26 ms** |
+| Snapshot build calls `/resume` once before settling (its code is then already in guest memory) | agent 19-21 -> 18-19 ms |
+| `snapshot.BuildVersion` in the key | old snapshots become stale automatically when the build procedure changes |
+
+**What did not help** (all within noise): settle time 0.5-5 s, guest memory 64 or 256 MiB (the load maps the file instead of copying it, so size does not matter), a pause between runs, pinning firecracker to one CPU (a WSL CPU number is not a fixed physical core).
+
+**Result on WSL2:** VM ready p50 **45 ms**, p99 **60-67 ms**. The median meets the target; p99 does not. With a cold page cache the faulted pages come from disk: restore ready 84 ms.
+
+**Found on the way:** a restored guest's console shows `random: crng reseeded due to virtual machine fork`. Firecracker 1.17 *does* provide the VM generation ID device, so the guest reseeds itself. We keep the agent's reseed as a second safeguard; the clock still needs `/resume`.
+
+**What would help next:** fewer or cheaper faults. Either a userfaultfd memory backend that copies the ~2,000 pages a call needs in one go at restore (the REAP paper, ASPLOS '21), or measuring on a machine without nested virtualization, where both the KVM setup and each fault are much cheaper. The warm pool (M7) avoids restoring at all for repeat calls.
+
+**Why we did not build the userfaultfd prefetch on the laptop:** *userfaultfd* lets a program handle another program's page faults itself. A short test showed WSL only lets a normal user create the "user-mode only" kind, which cannot catch the faults KVM causes. The full kind needs `/dev/userfaultfd`, which is root-only, because it is a known helper in kernel exploits. Firecracker's docs suggest `sudo setfacl -m u:$USER:rw /dev/userfaultfd`. We chose not to loosen a security setting on the laptop and to try the prefetch on the cloud node instead (M13).
 
 ---
 
@@ -1130,7 +1171,12 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 | One invoke over HTTP with snapshot restore | ~130 to 160 ms | 6 |
 | Building a base snapshot (incl. 1 s settle) | 2.1 to 2.5 s | 6 |
 | `make setup` re-run when all done | 0.6 s | 1 |
-| Target cold start (snapshot restore) | < 50 ms: p50 met, p99 not yet on WSL2 | 6 |
+| Snapshot restore after tuning, VM ready (p50 / p99 of 100, two runs) | 45-46 / 66-67 ms | 6 refine |
+| Snapshot restore, split (p50): spawn / load / agent | 1.5 / 23 / 21 ms | 6 refine |
+| Page faults after restore: agent ready / upload + call | ~520 / ~1,470 (~37 µs each) | 6 refine |
+| Snapshot restore with a cold page cache, VM ready (p50) | 84 ms | 6 refine |
+| Everything in Balance mode on battery | ~2x slower (boot 1.84 s) | 6 refine |
+| Target cold start (snapshot restore) | < 50 ms: p50 met, p99 not on WSL2 (nested virtualization) | 6 |
 
 ## Appendix D: general troubleshooting
 

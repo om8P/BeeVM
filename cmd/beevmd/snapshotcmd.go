@@ -66,7 +66,7 @@ func runSnapshot(args []string) int {
 		for _, s := range list {
 			status := "current"
 			if !s.Current {
-				status = "stale (images changed)"
+				status = "stale (images or build changed)"
 			}
 			fmt.Fprintf(w, "%s\t%d MiB\t%d\t%s\t%d ms\t%s\t%s\n", s.Key, s.Inputs.MemMiB, s.Inputs.VCPUs,
 				humanBytes(s.MemBytes), s.BuildMS, s.CreatedAt.Local().Format("2006-01-02 15:04:05"), status)

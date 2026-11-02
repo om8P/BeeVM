@@ -82,6 +82,15 @@ func newAgentClient(udsPath string) *AgentClient {
 	return &AgentClient{http: &http.Client{Transport: tr}, transport: tr}
 }
 
+// statusError means the agent answered, but with an error status. Retrying will not help,
+// unlike a connection error before the agent listens.
+type statusError struct {
+	code int
+	msg  string
+}
+
+func (e *statusError) Error() string { return fmt.Sprintf("agent returned %d: %s", e.code, e.msg) }
+
 // Close drops the idle connection.
 func (c *AgentClient) Close() { c.transport.CloseIdleConnections() }
 
@@ -107,11 +116,12 @@ func (c *AgentClient) do(ctx context.Context, method, path string, body io.Reade
 		return fmt.Errorf("read reply: %w", err)
 	}
 	if resp.StatusCode/100 != 2 {
+		msg := string(bytes.TrimSpace(data))
 		var e agentproto.ErrorResponse
 		if json.Unmarshal(data, &e) == nil && e.Error != "" {
-			return fmt.Errorf("agent returned %d: %s", resp.StatusCode, e.Error)
+			msg = e.Error
 		}
-		return fmt.Errorf("agent returned %d: %s", resp.StatusCode, bytes.TrimSpace(data))
+		return &statusError{code: resp.StatusCode, msg: msg}
 	}
 	if err := json.Unmarshal(data, out); err != nil {
 		return fmt.Errorf("decode reply: %w", err)

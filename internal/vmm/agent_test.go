@@ -21,9 +21,10 @@ import (
 // fakeFirecracker listens on a Unix socket like Firecracker's vsock bridge: it expects
 // "CONNECT <port>\n", answers with reply, and then serves HTTP on the connection.
 type fakeFirecracker struct {
-	path       string
-	handshakes atomic.Int32
-	gotPort    atomic.Int32
+	path        string
+	handshakes  atomic.Int32
+	gotPort     atomic.Int32
+	rejectFirst atomic.Int32 // close this many connections first, like a guest not listening yet
 }
 
 // startFake starts the fake. reply is the handshake answer ("" means close without answering).
@@ -68,7 +69,7 @@ func (l *handshakeListener) Accept() (net.Conn, error) {
 		if port, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "CONNECT "))); err == nil {
 			l.f.gotPort.Store(int32(port))
 		}
-		if l.reply == "" {
+		if l.reply == "" || l.f.rejectFirst.Add(-1) >= 0 {
 			conn.Close()
 			continue
 		}

@@ -58,6 +58,7 @@ func TestKeyChangesWithEveryInput(t *testing.T) {
 		"boot args":   func(i *Inputs) { i.BootArgs = "b" },
 		"memory":      func(i *Inputs) { i.MemMiB = 256 },
 		"vcpus":       func(i *Inputs) { i.VCPUs = 2 },
+		"build":       func(i *Inputs) { i.BuildVersion++ },
 	} {
 		in := base
 		change(&in)
@@ -218,5 +219,32 @@ func TestEnsureSurvivesCallerCancel(t *testing.T) {
 	}
 	if builds.Load() != 1 {
 		t.Errorf("builds %d", builds.Load())
+	}
+}
+
+func TestInputsCarryBuildVersion(t *testing.T) {
+	m, _ := newTestManager(t)
+	in, err := m.Inputs(128, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in.BuildVersion != BuildVersion || BuildVersion < 2 {
+		t.Errorf("build version %d, want %d (>= 2)", in.BuildVersion, BuildVersion)
+	}
+	old := in
+	old.BuildVersion = 1
+	if Key(old) == Key(in) {
+		t.Error("a snapshot made the old way must get a different key")
+	}
+}
+
+func TestSetSettle(t *testing.T) {
+	m, _ := newTestManager(t)
+	if m.settle != DefaultSettle {
+		t.Errorf("default settle %v", m.settle)
+	}
+	m.SetSettle(2 * time.Second)
+	if m.settle != 2*time.Second {
+		t.Errorf("settle %v", m.settle)
 	}
 }

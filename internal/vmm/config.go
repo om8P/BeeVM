@@ -35,6 +35,10 @@ type Config struct {
 	VCPUs          int64  // default 1
 	MemMiB         int64  // default 128
 	VsockCID       uint32 // the guest's vsock address; default 3 (0-2 are reserved, 2 is the host)
+
+	// Measuring and tuning (restored VMs only; used by the benchmark):
+	FirecrackerMetrics bool  // Firecracker writes metrics.json in the VM folder (see VM.FirecrackerLoadTime)
+	CPUs               []int // host CPUs the firecracker process may run on; empty = any
 }
 
 // applyDefaults fills empty fields. It returns a copy; the caller's Config is untouched.
@@ -107,6 +111,9 @@ func (c Config) VsockPath() string { return filepath.Join(c.Dir(), VsockRelPath)
 // which is Firecracker's working directory. A snapshot stores this path, so a VM restored in
 // another folder creates its socket in its own folder instead of the original VM's.
 const VsockRelPath = "v.sock"
+
+// MetricsPath is where Firecracker writes its metrics when FirecrackerMetrics is set.
+func (c Config) MetricsPath() string { return filepath.Join(c.Dir(), "metrics.json") }
 
 // ConsolePath is where guest serial output and Firecracker's own messages are written.
 func (c Config) ConsolePath() string { return filepath.Join(c.Dir(), "console.log") }

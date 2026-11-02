@@ -268,13 +268,12 @@ func restoreAndRun(ctx context.Context, base vmm.Config, snap snapshot.Snapshot,
 	defer vm.Cleanup(false)
 	res.VMID = vm.ID()
 
-	if _, err := vm.WaitForAgent(readyCtx); err != nil {
+	// The restored guest's clock is behind and its random state is a copy: the first request
+	// that reaches the agent fixes both, and its answer also means the agent is ready.
+	info, err := vm.WaitAndResume(readyCtx)
+	if err != nil {
 		return res, fmt.Errorf("wait for agent: %w", err)
 	}
-	// The restored guest's clock is behind and its random state is a copy: fix both first.
-	if _, err := vm.Agent().Resume(readyCtx); err != nil {
-		return res, fmt.Errorf("resume agent: %w", err)
-	}
-	res.BootMS = time.Since(vm.StartedAt()).Milliseconds()
+	res.BootMS = info.Ready.Milliseconds()
 	return res, runOn(ctx, readyCtx, vm, req, &res)
 }

@@ -60,14 +60,12 @@ func restored(t *testing.T, snap SnapshotFiles, fn string) (*VM, RestoreTimings,
 		t.Fatalf("restore: %v", err)
 	}
 	t.Cleanup(func() { _ = vm.Cleanup(false) })
-	ready, err := vm.WaitForAgent(ctx)
+	info, err := vm.WaitAndResume(ctx)
 	if err != nil {
 		b, _ := os.ReadFile(vm.ConsolePath())
 		t.Fatalf("agent after restore: %v\n%s", err, b)
 	}
-	if _, err := vm.Agent().Resume(ctx); err != nil {
-		t.Fatalf("resume: %v", err)
-	}
+	ready := info.Ready
 	if _, err := vm.Agent().UploadFunctionFile(ctx, fn); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
@@ -106,6 +104,41 @@ func TestSnapshotRestoreRunsFunction(t *testing.T) {
 			t.Errorf("restore %d: agent took %v to answer", i, ready)
 		}
 		_ = vm.Cleanup(false)
+	}
+}
+
+func TestRestoreWithMetricsAndPinning(t *testing.T) {
+	snap := makeSnapshot(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cfg := kvmConfig(t)
+	cfg.FirecrackerMetrics, cfg.CPUs = true, []int{0}
+	vm, tm, err := Restore(ctx, cfg, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vm.Cleanup(false)
+	if _, err := vm.WaitAndResume(ctx); err != nil {
+		t.Fatal(err)
+	}
+	fc, err := vm.FirecrackerLoadTime(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("load: ours %v, firecracker's %v", tm.Load, fc)
+	if fc <= 0 || fc > tm.Load {
+		t.Errorf("firecracker's load time %v should be positive and within ours (%v)", fc, tm.Load)
+	}
+	// Every thread of the process (incl. the vCPU thread created during the load) is pinned.
+	tasks, _ := filepath.Glob(fmt.Sprintf("/proc/%d/task/*/status", vm.PID()))
+	if len(tasks) < 2 {
+		t.Fatalf("found %d firecracker threads", len(tasks))
+	}
+	for _, p := range tasks {
+		b, _ := os.ReadFile(p)
+		if !strings.Contains(string(b), "Cpus_allowed_list:\t0\n") {
+			t.Errorf("%s is not pinned to CPU 0", p)
+		}
 	}
 }
 
