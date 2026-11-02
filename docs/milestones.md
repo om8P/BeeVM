@@ -103,7 +103,7 @@ Good reasons to refine: a test is flaky, code is hard to read, you don't underst
 
 ## M13: Cloud run, report and demo
 - **Goal:** finish and present.
-- **Do (optional cloud part):** Terraform for one nested-virtualization VM, rerun M12 there, compare with WSL2. **Always:** `docs/demo-script.md`, final architecture figures, README, report notes.
+- **Do (optional cloud part):** Terraform for one nested-virtualization VM, rerun M12 there, compare with WSL2. If restore p99 is still over 50 ms there, try the userfaultfd page prefetch deferred in the M6 refine (see `docs/progress.md`, 2026-11-02). **Always:** `docs/demo-script.md`, final architecture figures, README, report notes.
 - **Done when:** a fresh clone plus the README reproduces the demo, and the demo script runs in under 10 minutes.
 
 ---

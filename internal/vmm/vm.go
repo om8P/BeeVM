@@ -101,6 +101,52 @@ func (v *VM) WaitForAgent(ctx context.Context) (time.Duration, error) {
 	}
 }
 
+// ResumeInfo describes how a restored VM's agent came back.
+type ResumeInfo struct {
+	Ready           time.Duration // since the VM was started, until the resume call answered
+	Attempts        int           // requests sent; more than 1 means the agent was not listening yet
+	ClockAdjustedMS int64         // how far the guest clock was moved
+}
+
+// WaitAndResume is WaitForAgent and AgentClient.Resume in one request, for a VM that was just
+// restored from a snapshot. It sends /resume until the agent answers, so the first answer
+// already means "agent is up, clock and random state are fixed". That saves one round trip
+// over vsock compared with polling /health first. Sending /resume twice is harmless.
+func (v *VM) WaitAndResume(ctx context.Context) (ResumeInfo, error) {
+	var info ResumeInfo
+	v.mu.Lock()
+	t0 := v.startedAt
+	v.mu.Unlock()
+	if t0.IsZero() {
+		return info, errors.New("vm not started")
+	}
+	var lastErr error
+	tick := time.NewTicker(v.agentPoll)
+	defer tick.Stop()
+	for {
+		info.Attempts++
+		try, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		res, err := v.agent.Resume(try)
+		cancel()
+		if err == nil {
+			info.Ready, info.ClockAdjustedMS = time.Since(t0), res.ClockAdjustedMS
+			return info, nil
+		}
+		var se *statusError
+		if errors.As(err, &se) {
+			return info, fmt.Errorf("resume agent: %w", err) // it answered "no": retrying won't help
+		}
+		lastErr = err
+		select {
+		case <-v.exited:
+			return info, fmt.Errorf("vm exited before the agent answered (last error: %v)", lastErr)
+		case <-ctx.Done():
+			return info, fmt.Errorf("waiting for agent: %w (last error: %v)", ctx.Err(), lastErr)
+		case <-tick.C:
+		}
+	}
+}
+
 // ID returns the VM's id (useful when it was generated).
 func (v *VM) ID() string { return v.cfg.ID }
 

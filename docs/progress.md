@@ -12,7 +12,7 @@ Details of each milestone: `docs/milestones.md`.
 | 3 | Guest agent over vsock, first function runs | Done |
 | 4 | HTTP API, registry and CLI | Done |
 | 5 | Artifact store with MinIO/S3 | Done |
-| 6 | Snapshots and fast restore (the core) | Done, needs refinement (restore p50 47 ms but p99 59 ms on WSL2; snapshot load is the biggest part) |
+| 6 | Snapshots and fast restore (the core) | Done, refined once (restore p50 45 ms; p99 60-67 ms on WSL2, set by KVM load noise and page faults under nested virtualization; page prefetch needs root on WSL, deferred to the cloud node) |
 | 7 | Warm pool | Not started |
 | 8 | Python and Node.js runtimes, function snapshots | Not started |
 | 9 | Isolation and networking | Not started |
@@ -83,18 +83,6 @@ Status values: Not started · In progress · Done · Done, needs refinement (say
 - **Config:** `beevmd serve --s3-bucket/--s3-endpoint/--s3-region/--s3-path-style` or `BEEVM_S3_*` env. No bucket = local-only with a warning. A configured but unreachable store makes the server refuse to start. Real AWS = unset endpoint + real credentials; nothing else changes.
 - **Local MinIO:** `make minio` (no Docker), `make minio-up/minio-down` (Compose), settings in `deploy/minio.env` (throw-away dev credentials), `make test-s3`.
 - **MinIO is archived:** dl.min.io now answers 410 Gone for every community binary, so `scripts/minio.sh` builds the pinned source (`MINIO_GO_VERSION` in `scripts/common.sh`, Go checksum database verifies it) instead of downloading. First build takes a few minutes. The Compose image tag (`quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z`) is from memory and **not tested** (no Docker in WSL here); if the pull fails use `make minio`. The code only speaks plain S3, so any S3-compatible server works.
-- Verified: unit tests in 9 packages (also with `-race`), `make test-s3` against real MinIO, `make test-kvm` (all M1-M4 tests still pass). By hand with a real server + MinIO: deploy puts one object in the bucket; after wiping the local cache the first invoke is a miss (18 ms fetch) and the next a hit; deploying identical code under a second name adds no object; removing both functions empties the bucket; with MinIO stopped, deploying new code gives 503 while cached functions still run and the server refuses to start; without a bucket it runs local-only. No leftover processes.
-- Not done on purpose (later): cache size limit/eviction, retries with backoff on failed downloads, presigned direct uploads from the CLI, a KVM end-to-end variant backed by S3 (covered by the manual run), snapshot backups to S3 (M6).
-- Learned: S3 bucket names must be lowercase; HEAD responses have no body so "not found" is recognised by error code; Git Bash on Windows rewrites `/mnt/...` paths unless `MSYS_NO_PATHCONV=1` is set when calling `wsl.exe`.
-- **Next:** milestone 6 (snapshots and fast restore, the < 50 ms core).
-
-### 2026-10-26: Milestone 5
-- **Artifact store** (`internal/store`): `Blobs` interface (Put/Get/Exists/Delete) with an `S3` implementation on aws-sdk-go-v2 (works for MinIO and AWS S3; credentials from the standard AWS chain, never flags) and an in-memory `Mem` for tests. Uploads send a SHA-256 checksum so the server verifies them. Keys are `functions/<sha256>`.
-- **codestore is now a cache** in front of the store: `Publish` (upload if missing, so identical code uploads once), `Ensure` (local hit, or download, check the hash, move into place; parallel misses share one download via singleflight), `Delete` removes local and remote. Without a bucket it behaves exactly like M4.
-- **API:** deploy uploads to S3 *before* registering (S3 down gives 503 + `Retry-After`, nothing registered); invoke calls `Ensure` and returns `X-BeeVM-Code-Cache: hit|miss` and `X-BeeVM-Fetch-Ms` (also in the request log; `beevm invoke -v` prints them). Cached code keeps working while S3 is down.
-- **Config:** `beevmd serve --s3-bucket/--s3-endpoint/--s3-region/--s3-path-style` or `BEEVM_S3_*` env. No bucket = local-only with a warning. A configured but unreachable store makes the server refuse to start. Real AWS = unset endpoint + real credentials; nothing else changes.
-- **Local MinIO:** `make minio` (no Docker), `make minio-up/minio-down` (Compose), settings in `deploy/minio.env` (throw-away dev credentials), `make test-s3`.
-- **MinIO is archived:** dl.min.io now answers 410 Gone for every community binary, so `scripts/minio.sh` builds the pinned source (`MINIO_GO_VERSION` in `scripts/common.sh`, Go checksum database verifies it) instead of downloading. First build takes a few minutes. The Compose image tag (`quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z`) is from memory and **not tested** (no Docker in WSL here); if the pull fails use `make minio`. The code only speaks plain S3, so any S3-compatible server works.
 - Verified: unit tests in 9 packages (store 5, codestore 10 new, api 8 new, run with `-race`), `make test-s3` against real MinIO, `make test-kvm` (all M1-M4 tests still pass). By hand with a real server + MinIO: deploy puts one object in the bucket; after wiping the local cache the first invoke is a miss (18 ms fetch) and the next a hit; deploying identical code under a second name adds no object; removing both functions empties the bucket; with MinIO stopped, deploying new code gives 503 while cached functions still run and the server refuses to start; without a bucket it runs local-only. No leftover processes.
 - Not done on purpose (later): cache size limit/eviction, retries with backoff on failed downloads, presigned direct uploads from the CLI, a KVM end-to-end variant backed by S3 (covered by the manual run), snapshot backups to S3 (M6).
 - Learned: S3 bucket names must be lowercase; HEAD responses have no body so "not found" must be recognised by status/error code; Git Bash on Windows rewrites `/mnt/...` paths unless `MSYS_NO_PATHCONV=1` is set when calling `wsl.exe`.
@@ -130,3 +118,40 @@ Status values: Not started · In progress · Done · Done, needs refinement (say
   - The Bash tool on this machine rewrites backslash escapes in heredocs (a `\n` in a Go string became a real line break several times); use the Edit/Write tools for code with escapes.
 - **Refine later (M6 refine):** the snapshot load (24 ms p50) dominates; try smaller guest memory, hugepages, a cold-page-cache run, and measure on the cloud node (no nested virtualization). The kernel's 0.5 s i8042 probe at boot (`i8042.noaux` etc.) only matters for cold boots. Snapshot backup to S3 (deferred).
 - **Next:** milestone 7 (warm pool: reuse running VMs for the ~1 ms path; restored VMs fill the pool).
+
+### 2026-11-02: Milestone 6 refine (restore tuning)
+- Goal: restore p99 under 50 ms. **Result: not reached on WSL2.** p50 got slightly better (45-46 ms, was 47), p99 is 60-67 ms over two final runs (October's 59 ms was a quiet run; today's untouched baseline gave 61-77 ms). The analysis shows why and what would help next.
+- **Measured first.** The benchmark now splits "vm ready" into spawn / load / agent and counts the page faults of the firecracker process (`/proc/<pid>/stat`). New flags: `--probe resume|health`, `--fc-metrics` (Firecracker's own load time via `PUT /metrics` + `FlushMetrics`), `--cold-cache` (`posix_fadvise(DONTNEED)`, no sudo), `--settle`, `--gap`, `--pin`. New in `vmm`: `Config.FirecrackerMetrics`, `Config.CPUs`, `VM.FirecrackerLoadTime`, `VM.WaitAndResume` (all additive).
+- **Where the ~46 ms go** (p50): spawn 1.5, load 23, agent 21.
+  - *Load* happens inside Firecracker (its own number is within 0.5 ms of ours); Firecracker's debug log shows it is the "build microvm from snapshot" step (KVM setup), 10-35 ms, spread evenly (no fast/slow groups). This variance is the p99.
+  - *Agent*: the first request after a restore costs ~520 page faults at ~37 µs each = ~20 ms. Each first touch of a guest page goes through two hypervisors (WSL2 runs KVM inside Hyper-V). Upload + call add ~1,470 more faults, which is why they are slower than after a boot.
+- **Kept:**
+  - `WaitAndResume`: one request (`/resume`) instead of `/health` then `/resume`; used by the snapshot runner. Agent phase p50 22-23 -> 21 ms, p99 38-55 -> 24-26 ms.
+  - Snapshot build calls `/resume` once before settling (code path already in guest memory): agent 19-21 -> 18-19 ms in the same setup. `snapshot.BuildVersion` (now 2) is part of the key, so old snapshots became stale and were rebuilt automatically.
+- **Tried, no effect** (100 runs each, all within noise): settle 0.5 / 1 / 2 / 5 s; guest memory 64 / 256 MiB (load does not depend on memory size: it maps the file, it does not copy it); 100 ms pause between runs; pinning firecracker to one CPU (inside WSL a CPU number is not a fixed physical core). Pinning stays a bench-only flag.
+- Final benchmark (Performance mode, warm cache, 100 runs, `bench/results/m6refine/`, git-ignored):
+
+  | ms | p50 | p90 | p99 |
+  |---|---|---|---|
+  | boot: VM ready | 946.8 | 1137.2 | 1173.2 |
+  | restore: spawn | 1.5 | 1.7 | 2.1 |
+  | restore: load | 22.8 | 31.3 | 41.6 |
+  | restore: agent (incl. resume) | 20.9 | 22.1 | 26.0 |
+  | **restore: VM ready** | **45.2** | 55.8 | **65.9** |
+  | restore: upload 2.5 MB | 28.9 | 32.2 | 35.7 |
+  | restore: invoke | 16.9 | 18.4 | 20.1 |
+  | restore: first response | 91.6 | 102.1 | 112.9 |
+
+  Second restore run: ready 45.8 / 53.2 / 67.2. **Cold page cache** (30 runs): restore ready 84 ms p50 (agent phase 53 ms: the faulted pages now come from disk), boot 979 ms.
+- Learned:
+  - **Check the power mode first.** In Legion Balance Mode (31 % battery) everything was ~2x slower (boot 1.84 s, restore ready 118 ms). Benchmarks belong in Performance mode, plugged in (now in CLAUDE.md).
+  - **VMGenID does work** with Firecracker 1.17: a restored guest logs `random: crng reseeded due to virtual machine fork` (Firecracker also adds a VMClock device, which our 6.1 guest has no driver for). The earlier note "VMGenID not active" was wrong; the agent's own reseed in `/resume` stays as a second safeguard, and the clock still needs `/resume`.
+  - `strace` is not installed in WSL (needs sudo); Firecracker's `--level Trace` log was enough to locate the load time.
+- Cleaned up: duplicated M5 entry in this file and a duplicated line in CLAUDE.md. Two stale snapshots stay in `~/.beevm/snapshots` until `beevmd serve` or `beevmd snapshot rm --stale` removes them.
+- **Next refine options:** (1) userfaultfd memory backend with working-set prefetch (record the ~2,000 pages a call touches, copy them in one go at restore; the REAP paper, ASPLOS '21), a bigger task; (2) measure on the cloud/bare-metal node (no nested virtualization), where both the load and each fault should be much cheaper. Otherwise continue with milestone 7 (warm pool), which skips restore entirely for repeat calls.
+
+### 2026-11-02: Milestone 6 refine 2 (userfaultfd prefetch): spike only, deferred
+- Idea: restore with Firecracker's `Uffd` memory backend and our own page-fault handler that copies the ~2,000 pages a call needs in one go (the REAP paper), instead of ~37 µs per fault.
+- **Spike result: not possible on this WSL setup without a system change.** The kernel has `CONFIG_USERFAULTFD=y`, but `vm.unprivileged_userfaultfd = 0` and `/dev/userfaultfd` is `root:root 0600`. As a normal user only the "user-mode only" kind can be created (tested), and it cannot catch faults that KVM causes when the guest touches memory. Firecracker 1.17 opens `/dev/userfaultfd` on kernels >= 6.1; its docs say to grant access with `sudo setfacl -m u:$USER:rw /dev/userfaultfd` (resets when WSL restarts) or let the jailer expose it inside the jail.
+- Decision: leave the system as it is; try the prefetch on the cloud node (M12/M13), where Firecracker runs with root/jailer and without nested virtualization. Notes for then: the handler listens on a Unix socket (its path goes in `mem_backend.backend_path`), Firecracker connects and sends the userfaultfd plus the guest-memory layout, then never talks again; the handler fills pages with `UFFDIO_COPY` and must zero pages on `UFFD_EVENT_REMOVE` (balloon only; we have none). If the handler dies, Firecracker hangs, so use timeouts. Check the exact JSON fields in Firecracker's `src/firecracker/examples/uffd/` handlers.
+- **Next:** milestone 7 (warm pool).

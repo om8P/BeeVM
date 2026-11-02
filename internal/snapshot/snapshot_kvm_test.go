@@ -55,14 +55,11 @@ func TestBuildRealSnapshotAndRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer vm.Cleanup(false)
-	ready, err := vm.WaitForAgent(ctx)
+	info, err := vm.WaitAndResume(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := vm.Agent().Resume(ctx); err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("restored: spawn %v, load %v, agent ready after %v", tm.Spawn, tm.Load, ready)
+	t.Logf("restored: spawn %v, load %v, agent ready after %v (%d attempts)", tm.Spawn, tm.Load, info.Ready, info.Attempts)
 	if list, _ := m.List(); len(list) != 1 || !list[0].Current {
 		t.Errorf("list: %+v", list)
 	}
