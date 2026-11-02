@@ -15,7 +15,7 @@ It grows with the project: each finished milestone adds a section. The reasons b
 | Part 5: Milestone 3, guest agent over vsock, first function runs | Done |
 | Part 6: Milestone 4, HTTP API, registry and CLI | Done |
 | Part 7: Milestone 5, artifact store with MinIO / S3 | Done |
-| Part 8: Milestone 6, snapshots and fast restore | Done, refined (8.10) |
+| Part 8: Milestone 6, snapshots and fast restore | Done, refined (8.10); userfaultfd spike deferred (8.11) |
 | Part 9: the repository, GitHub and renames | Done |
 | Appendices: cheat sheet, versions, numbers, troubleshooting, regenerating these documents | — |
 
@@ -857,7 +857,7 @@ No new libraries.
 - its **clock** is behind (it stood still while the snapshot sat on disk; we measured 3 to 9 s);
 - its **random-number generator** is in the same state in every copy, which is dangerous for anything that needs secret random numbers.
 
-Fix: right after a restore the host calls the agent's `POST /resume` with the host's current time and 64 fresh random bytes. The agent sets the clock and gives the bytes to the kernel (`RNDADDENTROPY`), then forces the kernel to rebuild its generator from them (`RNDRESEEDCRNG`). Newer systems can do this automatically with a "VM generation ID" device, but it is not active in our guest, so we do it ourselves.
+Fix: right after a restore the host calls the agent's `POST /resume` with the host's current time and 64 fresh random bytes. The agent sets the clock and gives the bytes to the kernel (`RNDADDENTROPY`), then forces the kernel to rebuild its generator from them (`RNDRESEEDCRNG`). Newer systems can do this automatically with a "VM generation ID" device. We first thought it was not active in our guest; the M6 refine found that it is (Firecracker 1.17 provides it and the guest reseeds by itself, see 8.10.13). The agent's reseed stays as a second safeguard, and the clock still needs `/resume`.
 
 **4. Open connections do not survive.** A vsock connection that was open at snapshot time is broken after a restore. Fix: the builder closes the host's connection to the agent before pausing, and each restored VM gets a fresh client. The agent's *listening* socket survives, so the host simply connects again.
 
@@ -963,46 +963,299 @@ The tests prove: restored VMs answer correctly; parallel restores share one memo
 
 **Not done on purpose (later):** per-function snapshots (M8), the warm pool (M7), backing snapshots up to S3, tuning the snapshot load (smaller memory, hugepages, measuring with a cold page cache and on a cloud machine without nested virtualization). The tuning part was done in the M6 refine (8.10).
 
-### 8.10 Tuning the restore (M6 refine)
+### 8.10 Milestone 6 refine 1: tuning the restore
 
-Goal: bring restore p99 under 50 ms. Method: measure first, then change one thing at a time and run 100 restores per change.
+**Goal:** bring the restore's p99 under 50 ms (October: p50 47.0 ms, p99 59.1 ms). **Rule for a refine session:** no public interface may change (HTTP API, CLI commands, existing Go functions); new things may only be added. **Method:** measure first, then change one thing at a time and run 100 restores per change, one at a time, after one warm-up run that is not counted.
 
-**Before you measure: Performance mode, plugged in.** In Legion Balance Mode on battery everything was about 2x slower (boot 1.84 s instead of 0.94 s), which would have made every comparison useless.
+All result files of this session are in `bench/results/m6refine/` (git-ignored, so only on the laptop). Each run wrote a `.csv` with every single run and a `.md` with the table and the settings. The files are named after the time they were written:
 
-New benchmark columns and flags:
+| File (`coldstart-20261102-…`) | What was measured |
+|---|---|
+| `200207` / `200221` | baseline: old probe (`--probe health`) and new probe (`--probe resume`), both with `--fc-metrics` |
+| `200234` / `200248` | the same two again, without Firecracker metrics |
+| `200454` | first run with page-fault counting |
+| `200541`, `200555`, `200612`, `200631` | settle 1 s, 0.5 s, 2 s, 5 s (throw-away snapshots, old build procedure) |
+| `200649`, `200705` | guest memory 64 MiB and 256 MiB (settle 1 s) |
+| `200728` | 100 ms pause between runs |
+| `200742` | firecracker pinned to CPU 2 |
+| `200754` | plain baseline again (to see the drift during the session) |
+| `200851`, `200906` | new build procedure (warm-up `/resume`), settle 1 s, twice |
+| `201503` | **final:** 100 boots + 100 restores with the real, rebuilt snapshot |
+| `201516` | final restores again |
+| `201554` | cold page cache, 30 boots + 30 restores |
 
-```bash
-./bin/beevmd bench coldstart --mode restore --fc-metrics          # + Firecracker's own load time
-./bin/beevmd bench coldstart --mode restore --probe health        # the old way, for comparison
-./bin/beevmd bench coldstart --mode restore --settle 2s --mem 64  # throw-away snapshot, other settings
-./bin/beevmd bench coldstart --mode boot,restore --cold-cache --runs 30
+#### 8.10.1 Before measuring: check the power mode
+
+The first baseline came out about 2.5 times slower than in October, in *every* phase, not just one. That pointed at the machine, not the code: the laptop was in **Legion Balance Mode** at 31 % battery. After switching to **Legion Performance Mode** and plugging in, the October numbers came back.
+
+| ms, p50 | Balance mode, battery | Performance mode, plugged in |
+|---|---|---|
+| boot: VM ready (15 runs) | 1844.2 | 942.0 |
+| boot: upload / invoke | 55.9 / 11.2 | 14.1 / 3.0 |
+| restore: load | 29.4–32.8 | 22.7–23.3 |
+| restore: agent (old probe) | 82.8 | 22.2–23.3 |
+| restore: VM ready | 115.3–120.1 | 46.8–48.7 |
+| restore: upload / invoke | 92.5–95.2 / 44.1–45.0 | 24.3–25.5 / 14.9–16.1 |
+| restore: first response | 256.6–259.7 | 87.3–90.0 |
+
+The guest's CPU-heavy phases (agent, upload, invoke) slowed down by 3–4 times, the load only by 1.3 times. Check the mode in PowerShell with `powercfg /getactivescheme` (switch with Fn+Q on the Legion). The Balance-mode result files were deleted when the baseline was restarted; the numbers above are from the session log.
+
+#### 8.10.2 What "VM ready" is made of
+
+```mermaid
+flowchart LR
+  A["start firecracker<br/>spawn ~1.5 ms"] --> B["PUT /snapshot/load<br/>load ~23 ms<br/>(KVM setup, 10-35 ms)"]
+  B --> C["POST /resume over vsock<br/>agent ~21 ms<br/>(~520 page faults)"]
+  C --> D["VM ready<br/>~46 ms"]
+  D --> E["upload 2.5 MB ~29 ms<br/>invoke ~17 ms<br/>(~1,470 page faults)"]
+  E --> F["first response<br/>~92 ms"]
 ```
 
-`agent` is the time from the end of the load until the agent answered `/resume`. `faults agent` and `faults call` count the page faults of the firecracker process: each one is the guest touching a page of its memory for the first time after the restore.
+The October benchmark reported only spawn, load and "vm ready". Subtracting showed a hidden part of **~21 ms** after the load (range 9 to 33 ms): reconnecting to the agent and the `/resume` call. The raw October data also showed that the *slow* runs were slow because of the **load** (11 to 40 ms), while the hidden part was steady. So there were two targets: the load's variance (the p99) and the steady ~21 ms.
 
-**What the numbers showed** (p50 of ~46 ms in total):
+#### 8.10.3 New measuring tools
 
-- **Spawn, 1.5 ms**: nothing to gain.
-- **Load, ~23 ms, varying from 10 to 35 ms**: Firecracker measures the same time itself, so it is not our HTTP request. Its debug log (`firecracker --level Trace`) puts it in "build microvm from snapshot", which sets up KVM. Under WSL2 that runs as a VM inside Hyper-V (*nested virtualization*), and the host's scheduling noise makes it vary. **This variance is the p99.**
-- **Agent, ~21 ms**: about 520 page faults at ~37 µs each. Firecracker maps the memory file *privately*: pages are loaded on first touch (*lazy loading*) and copied on first write (*copy-on-write*). Each first touch needs both hypervisors to fix up their page tables. Upload and call add about 1,470 faults more.
+**New rows in the benchmark table** (restore only; rows marked *optional* are left out when no run filled them):
 
-**What we kept:**
+| Row | What it measures | How |
+|---|---|---|
+| `spawn` | firecracker process start until its API socket answers | unchanged |
+| `load` | our `PUT /snapshot/load` request, incl. resuming the vCPUs | unchanged |
+| `fc load` (optional) | the same load, measured by Firecracker itself | `--fc-metrics` |
+| `connect` (optional) | after the load until `/health` answered | only with `--probe health` |
+| `agent` | after the load until the agent answered `/resume` | new |
+| `attempts (n)` (optional) | requests sent until the agent answered | `--probe resume` |
+| `faults agent (n)` | page faults of the firecracker process during the agent phase | `/proc/<pid>/stat` |
+| `faults call (n)` | page faults during upload + invoke | `/proc/<pid>/stat` |
+| `vm ready` | start until the agent is ready (spawn + load + agent) | unchanged meaning |
 
-| Change | Effect (same conditions) |
+The CSV now has the columns `mode, run, spawn_ms, load_ms, fc_load_ms, connect_ms, agent_ms, attempts, faults_agent, faults_call, ready_ms, upload_ms, invoke_ms, first_response_ms`. The `.md` summary has a new "Settings" line that says how the run was made.
+
+**New flags** of `beevmd bench coldstart`:
+
+| Flag | What it does | Details and caveats |
+|---|---|---|
+| `--probe resume\|health` | how to wait for the agent after a restore | `resume` (default): `VM.WaitAndResume`, one request. `health`: the old way, `/health` until it answers, then `/resume`, kept for comparison |
+| `--fc-metrics` | also record Firecracker's own load time | Restore sends `PUT /metrics` (file `metrics.json` in the VM folder) before the load; after the call, `PUT /actions {"action_type":"FlushMetrics"}` and read `latencies_us.load_snapshot`. The flush is outside every measured time; the `PUT /metrics` (~0.3 ms) is inside "vm ready" |
+| `--cold-cache` | drop the files from the host's page cache before every run | `posix_fadvise(POSIX_FADV_DONTNEED)` on the firecracker binary, kernel, rootfs and (restore) snapshot files; no sudo needed, unlike `drop_caches`. Pages mapped by a running process stay cached, so **don't use it while `beevmd serve` runs**. On WSL2 the "disk" is a virtual disk file that Windows may still cache |
+| `--settle D` | build a throw-away snapshot with this settle time | Built in `~/.beevm/run/bench/snapshots/` and deleted when the benchmark ends. The settle time is not part of the snapshot key, so a throw-away snapshot has the same key as the real one: that is why it lives in its own folder |
+| `--gap D` | pause after every run | tests whether tearing down the previous VM disturbs the next one |
+| `--pin CPUS` | restore only: limit the firecracker process to these host CPUs | e.g. `--pin 2`; CPU numbers are checked against the machine |
+| `--mem N`, `--vcpus N` | VM size | existed already; with `--settle` the snapshot is a throw-away one too |
+
+```bash
+./bin/beevmd bench coldstart --mode restore --runs 100 --probe health --fc-metrics
+./bin/beevmd bench coldstart --mode restore --runs 100 --settle 2s
+./bin/beevmd bench coldstart --mode restore --runs 100 --settle 1s --mem 64
+./bin/beevmd bench coldstart --mode restore --runs 100 --gap 100ms
+./bin/beevmd bench coldstart --mode restore --runs 100 --pin 2
+./bin/beevmd bench coldstart --mode boot,restore --runs 30 --cold-cache
+```
+
+**Counting page faults.** Linux counts, per process, how often it had to fix up a missing page: *minor* faults (the page was in memory, it only had to be mapped) and *major* faults (it had to be read from disk). `/proc/<pid>/stat` has them as fields 10 (`minflt`) and 12 (`majflt`), summed over all threads. When the guest touches a page of its memory for the first time after a restore, KVM fixes it up on the firecracker vCPU thread, so that thread's fault counter goes up. The benchmark reads the counter right after the load, when the agent is ready, and after the first response. The command name in field 2 can contain spaces, so the parser skips to the last `)` first.
+
+#### 8.10.4 The baseline: old way vs new way
+
+Four runs in Performance mode, 100 restores each (p50 / p90 / p99 / max, ms):
+
+| Row | A: `health` + metrics (`200207`) | B: `resume` + metrics (`200221`) | A2: `health` (`200234`) | B2: `resume` (`200248`) |
+|---|---|---|---|---|
+| spawn | 1.5 / 1.9 / 4.7 / 11.5 | 1.5 / 2.0 / 2.8 / 10.4 | 1.5 / 1.7 / 2.6 / 2.6 | 1.5 / 1.9 / 2.7 / 3.3 |
+| load | 22.7 / 34.9 / 45.3 / 45.4 | 23.3 / 32.0 / 37.5 / 43.3 | 22.8 / 31.5 / 39.2 / 40.6 | 23.1 / 34.2 / 39.1 / 47.8 |
+| fc load | 22.5 / 34.7 / 45.1 / 45.2 | 22.6 / 30.8 / 35.7 / 36.7 | – | – |
+| connect | 19.3 / 28.3 / 42.1 / 50.0 | – | 18.6 / 19.9 / 27.5 / 38.7 | – |
+| agent | 23.3 / 33.7 / 55.1 / 60.8 | 20.6 / 22.8 / 24.4 / 34.1 | 22.2 / 24.1 / 37.8 / 41.8 | 21.7 / 25.4 / 43.9 / 48.3 |
+| **vm ready** | 48.7 / 64.9 / 80.7 / 82.4 | 47.4 / 56.2 / 61.0 / 65.6 | 46.8 / 56.2 / 66.8 / 78.1 | 47.0 / 58.8 / 76.7 / 77.9 |
+| upload | 24.5 / 36.5 / 46.1 / 47.8 | 24.3 / 27.7 / 32.4 / 43.7 | 24.6 / 28.9 / 36.2 / 80.4 | 25.5 / 31.9 / 58.2 / 81.0 |
+| invoke | 16.1 / 22.5 / 32.1 / 32.8 | 15.0 / 16.9 / 24.7 / 28.6 | 15.3 / 18.3 / 27.9 / 48.9 | 14.9 / 19.2 / 28.8 / 31.8 |
+| first response | 90.0 / 122.2 / 134.9 / 146.3 | 87.9 / 96.2 / 103.7 / 104.4 | 87.3 / 98.6 / 127.5 / 187.9 | 88.6 / 106.5 / 157.1 / 157.5 |
+
+What this says:
+
+- **Our request around the load costs almost nothing:** `load` and `fc load` differ by 0.2–0.7 ms at p50. The ~23 ms happen *inside* Firecracker.
+- **The new probe saves ~1.5 ms at p50** (agent 22.2–23.3 → 20.6–21.7 ms). Not more, because even a single request takes ~20 ms: the *first* request after a restore is slow in itself (see 8.10.6).
+- `attempts` was 1 in every run: the agent always answered the very first request, so the 1 ms polling never had to wait.
+- **Identical runs differ a lot at p99** (B 61.0 ms vs B2 76.7 ms). Tails need repeated runs before you believe a difference.
+
+#### 8.10.5 Where the load time goes
+
+1. **Firecracker metrics work before a load.** A hand test with `curl --unix-socket` showed that `PUT /metrics` before `PUT /snapshot/load` is accepted (204), and that `FlushMetrics` writes one JSON line per flush. `latencies_us.load_snapshot` was 42,903 µs on that first, cold try; the `vmm_*` latency fields stayed 0 (not filled in by this version).
+2. **The console log has timestamps.** A restore with `beevmd invoke --restore --keep-logs` left a `console.log` in which Firecracker logs each step. Between "Snapshot CPU vendor ID" and "Artificially kick devices" 32 ms passed; the whole load took 32.7 ms. The same run: the three calls took 16.4, 6.3 and 4.4 ms round trip (the first call pays for the page faults), the agent was ready after 61.1 ms, killing the VM took 57 ms.
+3. **Trace logging names the step.** Started by hand with `firecracker --api-sock … --level Trace --show-level --show-log-origin`, Firecracker logs `event_start: build microvm from snapshot` and `event_end` 10.3 ms later, of a 10.7 ms load. In between it builds the **VMGenID** device (address `0x000dfff0`, IRQ 7), writes a new generation ID into the guest and notifies the guest's **VMClock** device. Everything else in the load is under 0.5 ms.
+4. `strace` would show each KVM call, but it is not installed in WSL and installing it needs sudo. The trace log was enough.
+5. **No fast and slow groups.** Sorting the 100 load times of run `200754` and taking every tenth one gives 11.4, 15.5, 18.1, 19.8, 23.2, 23.6, 26.1, 28.1, 31.2, 33.6 ms: an even spread, not two clusters. So it is not one switch (like "the vCPU landed on a slow core"); it is general scheduling noise.
+
+**Why the load is slow and varies.** "Build microvm from snapshot" creates a KVM virtual machine, its vCPU and its memory regions, and restores the CPU registers. Each of these is a call into KVM. Under WSL2, KVM itself runs inside a Hyper-V virtual machine (*nested virtualization*: Hyper-V is level 0, the WSL kernel with KVM is level 1, our guest is level 2). Many KVM operations then cause exits to Hyper-V, and the time depends on what Hyper-V and Windows are doing at that moment. Nothing in our code can change that; on a bare-metal Linux machine KVM talks to the hardware directly.
+
+#### 8.10.6 Where the agent time goes: page faults
+
+Run `200454` was the first with fault counting:
+
+| Row | p50 | p90 | p99 | max |
+|---|---|---|---|---|
+| agent (ms) | 20.0 | 22.2 | 23.9 | 24.5 |
+| faults agent | 544 | 591 | 601 | 606 |
+| upload + invoke (ms) | 24.2 + 14.1 | | | |
+| faults call | 1414 | 1421 | 1433 | 1453 |
+
+- **544 faults in 20 ms = ~37 µs per fault.** Upload + invoke: 1,414 faults in ~38 ms = ~27 µs per fault.
+- Runs with fewer faults are faster: in run `200754` the run with 330 faults needed 14.1 ms for the agent phase, one with 426 faults 17.7 ms, typical ones with ~550–580 faults 19–23 ms.
+
+**Why a page fault costs so much here.** The guest's memory is the snapshot's `mem` file, mapped *privately* by Firecracker (`mem_backend` type `File`). Nothing is read at restore time; a page comes in when the guest first touches it (*lazy loading*), and a write makes a private copy of that one page (*copy-on-write*). The guest uses guest-physical addresses, so the CPU translates twice: guest page tables, then a second table that KVM keeps (*EPT*, Intel's *second level address translation*). On the first touch that second table has no entry, so the CPU stops the guest and asks KVM to fill it in. Under nested virtualization that stop goes to Hyper-V first, which hands it to the WSL kernel's KVM, which maps the file page (a minor fault), and then Hyper-V must update its own tables too. One page = several switches between hypervisors = tens of microseconds. On bare metal it is a few microseconds.
+
+**Why the guest touches ~2 MB to answer one request.** The guest kernel wakes up, handles the vsock device's reset event, the VMGenID notification and the reseed of its random generator; the agent's Go runtime wakes its goroutines and allocates buffers for the HTTP connection. Each of these touches pages that were never touched since the restore. We did not trace this inside the guest; the page count is what matters.
+
+#### 8.10.7 The experiments: what did not help
+
+Every knob, 100 restores each, p50 / p99 (ms; faults: p50):
+
+| Run | load | agent | faults agent | faults call | **vm ready** | upload | invoke | first response |
+|---|---|---|---|---|---|---|---|---|
+| settle 0.5 s (`200555`) | 24.1 / 40.9 | 19.6 / 24.6 | 529 | 1443 | 46.2 / 60.2 | 25.4 / 56.2 | 14.5 / 20.6 | 86.8 / 127.6 |
+| settle 1 s (`200541`) | 24.2 / 45.1 | 19.2 / 22.9 | 504 | 1460 | 46.2 / 62.0 | 25.8 / 31.3 | 16.3 / 18.6 | 88.3 / 116.4 |
+| settle 2 s (`200612`) | 26.5 / 45.3 | 18.8 / 24.1 | 427 | 1434 | 47.7 / 61.0 | 25.2 / 34.6 | 15.5 / 17.7 | 88.8 / 104.5 |
+| settle 5 s (`200631`) | 24.9 / 38.0 | 19.0 / 23.4 | 484 | 1442 | 45.2 / 60.7 | 26.2 / 69.2 | 15.2 / 17.8 | 86.4 / 121.4 |
+| 64 MiB (`200649`) | 23.1 / 43.8 | 22.2 / 42.9 | 546 | 1597 | 46.6 / 77.1 | 32.2 / 141.7 | 15.9 / 33.3 | 95.2 / 237.5 |
+| 256 MiB (`200705`) | 23.0 / 47.2 | 20.9 / 43.7 | 538 | 1461 | 45.5 / 74.4 | 27.3 / 59.2 | 16.6 / 32.6 | 90.2 / 151.0 |
+| 100 ms gap (`200728`) | 22.1 / 38.0 | 22.5 / 25.0 | 568 | 1413 | 46.9 / 65.0 | 25.1 / 40.3 | 15.1 / 19.0 | 87.8 / 107.4 |
+| pinned to CPU 2 (`200742`) | 24.0 / 44.0 | 22.2 / 27.0 | 589 | 1411 | 47.6 / 73.6 | 24.4 / 31.1 | 14.7 / 18.7 | 86.3 / 111.2 |
+| plain (`200754`) | 23.6 / 43.4 | 20.9 / 25.0 | 568 | 1413 | 47.0 / 67.2 | 23.9 / 34.1 | 14.5 / 18.3 | 86.3 / 106.6 |
+
+- **Settle time (0.5–5 s):** no clear effect. The fault count moves a little (427–529), but load and "vm ready" stay within the noise. 1 s stays the default.
+- **Guest memory 64 / 256 MiB:** the load does *not* depend on memory size, because Firecracker maps the file instead of reading it. 64 MiB made the call slower (1,597 faults, upload p99 142 ms): the guest has less free memory and works harder for the 2.5 MB upload. The function's own memory setting decides the snapshot size anyway, so nothing to change.
+- **100 ms pause between runs:** no change, so tearing down the previous VM does not disturb the next one.
+- **Pinning to one CPU:** no help, slightly worse. Inside WSL, "CPU 2" is a virtual CPU that Hyper-V moves between physical cores (this laptop's i7-13620H has fast P-cores and slower E-cores), so pinning cannot choose a fast core. Pinning stays a benchmark flag; the server does not pin (it would crowd many VMs onto few cores and hurt density, to be judged in M12).
+
+#### 8.10.8 What we kept
+
+**1. One request instead of two (`VM.WaitAndResume`).** The server's restore path (`internal/runner/runner.go`, `restoreAndRun`) used to poll `/health` until the agent answered and then send `/resume`. Now it sends `/resume` right away and repeats it until it succeeds: the first answer means "the agent is up, its clock is set, its random generator is reseeded". Sending `/resume` twice is harmless, and every retry carries the current time. If the agent *answers* with an error (it got the request but refused it), retrying would not help, so it stops at once. To tell the two cases apart, the agent client now returns a typed `statusError` for "the agent answered with an error status" (the message text is unchanged). Effect, same conditions: agent p50 22.2–23.3 → 20.6–21.7 ms, **p99 37.8–55.1 → 24.4–43.9 ms**; in the final runs p99 was 23.6–26.0 ms.
+
+**2. Warm-up call before snapshotting.** `snapshot.buildVM` now calls `/resume` once after the agent is up and before the 1 s settle. The code of the resume handler (JSON decoding, `settimeofday`, the entropy ioctls) is then already read from the root disk into guest memory when the snapshot is taken. Without it, the first restore-time `/resume` made the guest read those pages from the virtual disk first. The fault count barely moved (~520 vs ~504–544), but the agent phase did, measured twice with throw-away snapshots and settle 1 s:
+
+| ms, p50 / p99 | old build, settle 1 s (`200541`) | new build (`200851`) | new build (`200906`) |
+|---|---|---|---|
+| agent | 19.2 / 22.9 | 18.0 / 24.6 | 19.2 / 21.3 |
+| vm ready | 46.2 / 62.0 | 41.9 / 67.3 | 43.3 / 62.6 |
+| faults agent | 504 | 519 | 519 |
+
+We did **not** upload and run a function before snapshotting: that would leave a function file inside every restored VM (an invoke before upload would then run it instead of answering 409). The snapshot stays a clean, empty agent.
+
+**3. `snapshot.BuildVersion` in the key.** The snapshot key already hashed everything a snapshot depends on (Firecracker version, kernel, rootfs and its path, boot args, memory, vCPUs). A change in *how* the snapshot is built was not covered, so the old snapshot would have been reused. Now `Inputs` has a `build_version` field filled from the constant `snapshot.BuildVersion` (1 = the M6 procedure, 2 = with the warm-up call). After the change, `beevmd snapshot ls` showed the two old snapshots as stale, and the next benchmark built the new one automatically (`f6b97d9527d38143d667`, 2,106 ms). **Bump `BuildVersion` whenever `buildVM` changes.** The status text in `snapshot ls` now says "stale (images or build changed)".
+
+#### 8.10.9 Final result
+
+Performance mode, plugged in, warm page cache, real snapshot, one at a time (p50 / p90 / p99 / max, ms):
+
+| Row | final (`201503`) | again (`201516`) |
+|---|---|---|
+| boot: VM ready | 946.8 / 1137.2 / 1173.2 / 1178.6 | – |
+| boot: upload / invoke | 13.9 / 2.8 (p50) | – |
+| boot: first response | 960.7 / 1176.7 / 1206.0 / 1213.3 | – |
+| restore: spawn | 1.5 / 1.7 / 2.1 / 12.1 | 1.5 / 1.7 / 2.3 / 2.4 |
+| restore: load | 22.8 / 31.3 / 41.6 / 44.1 | 23.1 / 31.4 / 43.3 / 51.4 |
+| restore: agent | 20.9 / 22.1 / 26.0 / 26.1 | 20.9 / 22.4 / 23.6 / 23.9 |
+| restore: faults agent / call (p50) | 514 / 1464 | 510 / 1463 |
+| **restore: VM ready** | **45.2** / 55.8 / **65.9** / 68.2 | **45.8** / 53.2 / **67.2** / 72.8 |
+| restore: upload | 28.9 / 32.2 / 35.7 / 37.7 | 29.1 / 32.9 / 37.7 / 39.5 |
+| restore: invoke | 16.9 / 18.4 / 20.1 / 24.2 | 17.0 / 18.5 / 20.2 / 25.3 |
+| restore: first response | 91.6 / 102.1 / 112.9 / 114.2 | 92.0 / 102.7 / 113.4 / 118.0 |
+
+**Cold page cache** (`201554`, 30 runs each, files dropped before every run):
+
+| Row | p50 | p90 | p99 |
+|---|---|---|---|
+| boot: VM ready | 978.7 | 1001.1 | 1073.2 |
+| restore: spawn | 6.5 | 7.9 | 10.2 |
+| restore: load | 23.9 | 33.1 | 37.4 |
+| restore: agent | 52.8 | 56.6 | 74.3 |
+| restore: VM ready | 84.3 | 99.0 | 101.1 |
+| restore: first response | 137.4 | 148.7 | 180.9 |
+
+With a cold cache the firecracker binary must be read (spawn 6.5 ms) and every faulted page comes from the disk (agent 52.8 ms, same fault count). The load itself does not read the memory file, so it does not change. Boot only gets 30 ms slower, because it reads the kernel and a few MB of the disk once.
+
+**Verdict.** The median met the target before and now has a little more margin (45–46 ms instead of 47 ms). The p99 is 60–67 ms. October's 59 ms came from a quieter run: today's untouched baseline gave 61–77 ms. The tail is set by the load's KVM noise and by ~520 page faults at ~37 µs each, both caused by nested virtualization. The steps we kept removed the agent phase's tail (p99 24–26 ms instead of 38–55 ms).
+
+#### 8.10.10 The code changes in detail
+
+| File | Change |
 |---|---|
-| `VM.WaitAndResume`: send `/resume` straight away instead of `/health` first (one request instead of two) | agent p50 22-23 -> 21 ms, **p99 38-55 -> 24-26 ms** |
-| Snapshot build calls `/resume` once before settling (its code is then already in guest memory) | agent 19-21 -> 18-19 ms |
-| `snapshot.BuildVersion` in the key | old snapshots become stale automatically when the build procedure changes |
+| `internal/vmm/vm.go` | `ResumeInfo{Ready, Attempts, ClockAdjustedMS}`; `VM.WaitAndResume(ctx)`: polls with `/resume` at the VM's poll interval (1 ms after a restore), 500 ms limit per attempt, stops at once on an agent error answer, on VM exit or on `ctx` end |
+| `internal/vmm/agent.go` | `statusError{code, msg}` for non-2xx answers from the agent (same text as before: `agent returned <code>: <message>`) |
+| `internal/vmm/config.go` | `Config.FirecrackerMetrics bool`, `Config.CPUs []int` (both used by restored VMs only), `Config.MetricsPath()` |
+| `internal/vmm/restore.go` | after the API socket answers: pin all threads if `CPUs` is set; `PUT /metrics` if `FirecrackerMetrics` is set |
+| `internal/vmm/tuning.go` (new) | `pinProcess` (sets the affinity of every thread listed in `/proc/<pid>/task`; the vCPU thread is created later during the load and inherits it), `VM.FirecrackerLoadTime(ctx)` (flush + read), `loadTimeFromMetrics` |
+| `internal/runner/runner.go` | `restoreAndRun` uses `WaitAndResume`; `BootMS` comes from `ResumeInfo.Ready` |
+| `internal/snapshot/snapshot.go` | `Inputs.BuildVersion`, constant `BuildVersion = 2`, warm-up `/resume` in `buildVM`, `Manager.SetSettle(d)` |
+| `cmd/beevmd/bench.go` | `benchSettings`, new rows and flags, `benchSnapshot` (normal or throw-away snapshot), `dropFromPageCache`, `processFaults`, `parseCPUs`, `describeSettings`, optional table rows, new CSV columns; the warm-up run is now run 0 of the same loop |
+| `cmd/beevmd/snapshotcmd.go` | stale label text |
+| `go.mod` | `golang.org/x/sys` is now a direct dependency (`unix.SchedSetaffinity`, `unix.Fadvise`) |
 
-**What did not help** (all within noise): settle time 0.5-5 s, guest memory 64 or 256 MiB (the load maps the file instead of copying it, so size does not matter), a pause between runs, pinning firecracker to one CPU (a WSL CPU number is not a fixed physical core).
+A first version pinned only the main thread right after `cmd.Start`. Firecracker may already have started its API thread by then, so the final version waits until the API socket answers and then pins every existing thread.
 
-**Result on WSL2:** VM ready p50 **45 ms**, p99 **60-67 ms**. The median meets the target; p99 does not. With a cold page cache the faulted pages come from disk: restore ready 84 ms.
+#### 8.10.11 Tests added
 
-**Found on the way:** a restored guest's console shows `random: crng reseeded due to virtual machine fork`. Firecracker 1.17 *does* provide the VM generation ID device, so the guest reseeds itself. We keep the agent's reseed as a second safeguard; the clock still needs `/resume`.
+```bash
+make test       # new: WaitAndResume (first try; 3 refused connections -> 4 attempts, 1 resume;
+                #      agent error 500 -> no retry; gives up when ctx ends; VM never started),
+                #      loadTimeFromMetrics, pinProcess rejects CPU -1, bench optional rows,
+                #      parseCPUs, describeSettings, processFaults, BuildVersion changes the key,
+                #      Inputs carry BuildVersion, SetSettle
+make test-kvm   # new: TestRestoreWithMetricsAndPinning (Firecracker's load time > 0 and <= ours;
+                #      every firecracker thread has Cpus_allowed_list 0); all restore tests now use
+                #      WaitAndResume
+```
 
-**What would help next:** fewer or cheaper faults. Either a userfaultfd memory backend that copies the ~2,000 pages a call needs in one go at restore (the REAP paper, ASPLOS '21), or measuring on a machine without nested virtualization, where both the KVM setup and each fault are much cheaper. The warm pool (M7) avoids restoring at all for repeat calls.
+The fake Firecracker in `internal/vmm/agent_test.go` got a `rejectFirst` counter: it closes that many connections first, like a guest whose agent is not listening yet. Results: unit tests in 11 packages pass, also with `-race` for `vmm`, `snapshot`, `runner` and `cmd/beevmd`; all KVM tests pass (the KVM logs showed a restore with spawn 1.4 ms, load 16.2 ms, ready 41.4 ms, 1 attempt; metrics test: our load 19.06 ms, Firecracker's 18.79 ms); no leftover firecracker processes or folders.
 
-**Why we did not build the userfaultfd prefetch on the laptop:** *userfaultfd* lets a program handle another program's page faults itself. A short test showed WSL only lets a normal user create the "user-mode only" kind, which cannot catch the faults KVM causes. The full kind needs `/dev/userfaultfd`, which is root-only, because it is a known helper in kernel exploits. Firecracker's docs suggest `sudo setfacl -m u:$USER:rw /dev/userfaultfd`. We chose not to loosen a security setting on the laptop and to try the prefetch on the cloud node instead (M13).
+#### 8.10.12 Problems we hit in the refine
+
+| Problem | Why | What we did |
+|---|---|---|
+| The first baseline was 2.5x slower in every phase | Legion Balance Mode, 31 % battery | Switched to Performance mode, plugged in; reran the baseline; note in CLAUDE.md |
+| `go test ./...` was killed with exit code 15 and no output | The tool that ran it stopped after 400 s; the first `go vet` over the Windows-mounted folder (`/mnt/c`) alone took about 5 minutes | Ran long commands in the background with a log file; later runs were fast (build cache) |
+| `gofmt` complained about `agent_test.go` | A new struct field broke the column alignment | `gofmt -w` |
+| A shell trick to edit two test files did nothing | `python3` in Git Bash is the Windows Python, which opened an interactive prompt instead of reading the script | Made the edits with the editor tool |
+| `strace` not available | Not installed in WSL; installing needs sudo | Firecracker's `--level Trace` log was enough |
+| Pinning could miss a thread | The API thread may exist before we pin | Pin all threads after the API socket answers |
+| Identical runs gave different p99 (61 vs 77 ms) | Host noise under nested virtualization | Compared like with like in the same session, ran key measurements twice |
+| `snapshot ls` said "images changed" although only the build changed | Old label | New label: "images or build changed" |
+
+#### 8.10.13 Found on the way: the VM generation ID works
+
+Milestone 6 assumed that the guest has no active VM generation ID device. The restored guest's console says otherwise: `random: crng reseeded due to virtual machine fork`, and Firecracker's trace log of a load shows it building the VMGenID device and writing a new generation ID into the guest. Firecracker's own documentation says "Firecracker implements VMGenID". So the guest kernel reseeds its random generator by itself after a restore. The agent's reseed in `/resume` stays as a second safeguard (it costs nothing extra, because `/resume` is needed for the clock anyway). Firecracker 1.17 also has a **VMClock** device that tells the guest about clock changes, but our 6.1 guest kernel has no driver for it, so the clock still needs `/resume`.
+
+### 8.11 Milestone 6 refine 2: userfaultfd page prefetch (spike only, deferred)
+
+**The idea.** Most of the time after the load is page faults, ~2,000 per call at ~27–37 µs each. The REAP paper (Ustiugov et al., ASPLOS 2021) showed that a restored serverless function touches almost the same pages every time. So: record which pages one call touches, and at the next restore copy exactly those pages into the VM in one go, before the guest needs them. The tool for that is **userfaultfd**: a Linux feature that lets one program handle the page faults of another program's memory. Firecracker supports it as a memory backend (`mem_backend` type `Uffd`): instead of mapping the `mem` file, it lets our handler process fill in the pages.
+
+**How it would work with Firecracker 1.17** (from its documentation, "handling page faults on snapshot resume"):
+
+1. Our handler listens on a Unix socket; its path goes into `mem_backend.backend_path` of `PUT /snapshot/load`.
+2. Firecracker creates the userfaultfd, maps empty guest memory, registers it, connects to our socket and sends the userfaultfd plus the guest-memory layout (each region's address, size and page size). After that it never talks to the handler again.
+3. The handler copies pages into the guest with `UFFDIO_COPY`. It must zero pages after `UFFD_EVENT_REMOVE` (only sent with a balloon device, which we don't have).
+4. If the handler dies during a restore, Firecracker waits forever at the next fault, so the handler needs timeouts. It can check who connected with `SO_PEERCRED`.
+5. On kernels 6.1 and newer, Firecracker creates the userfaultfd through **`/dev/userfaultfd`**, and access is "managed by file system permissions".
+
+**The spike: can it work on this laptop without sudo?** Checked in WSL:
+
+```text
+CONFIG_USERFAULTFD=y                         the kernel supports it
+/proc/sys/vm/unprivileged_userfaultfd = 0    normal users may not use the full version
+/dev/userfaultfd: crw------- root root       root only
+CapEff: 0000000000000000                     our user has no special capabilities
+```
+
+A small test calling the `userfaultfd` system call as the normal user:
+
+```text
+userfaultfd full (handles KVM/kernel faults): FAILED: Operation not permitted
+userfaultfd user-mode only: OK fd=3
+/dev/userfaultfd: Permission denied
+```
+
+The "user-mode only" kind is no use: it only catches faults caused by user programs, but the guest's faults are handled inside the kernel by KVM. **So it cannot work here without loosening a security setting.** Firecracker's documentation suggests `sudo setfacl -m u:$USER:rw /dev/userfaultfd` for running without the jailer. The setting is locked down by default for a reason: full userfaultfd lets a program pause the kernel in the middle of copying memory, which is a known helper for exploiting kernel race bugs. It would also reset whenever WSL restarts.
+
+**Decision:** leave the laptop's security settings alone, and try the prefetch on the cloud node (M13), where Firecracker runs with root or the jailer (which makes `/dev/userfaultfd` available inside each jail) and without nested virtualization, so the fault cost is lower anyway. Before building it there, read Firecracker's example handlers in `src/firecracker/examples/uffd/` for the exact message format (the documentation does not name the JSON fields).
 
 ---
 
@@ -1117,6 +1370,9 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 | `./bin/beevmd invoke --code F [--payload J] [--repeat N] [--timeout D] [--console] [--keep-logs] [--restore]` | milestone 3: run a function in a VM (`--restore`: from the base snapshot, milestone 6) |
 | `./bin/beevmd snapshot build [--mem N --vcpus N]` / `ls` / `rm <key>` / `rm --stale` | milestone 6: manage base snapshots |
 | `./bin/beevmd bench coldstart [--runs N] [--mode boot,restore]` | milestone 6: p50/p90/p99 of boot vs restore, saved to `bench/results/` |
+| `./bin/beevmd bench coldstart … [--probe resume\|health] [--fc-metrics] [--cold-cache] [--settle D] [--gap D] [--pin CPUS] [--mem N] [--out DIR]` | M6 refine: tuning experiments (see 8.10.3) |
+| `powercfg /getactivescheme` (PowerShell) | check the power mode before benchmarking (Performance mode, plugged in) |
+| `firecracker --api-sock S --level Trace --show-level --show-log-origin` | Firecracker with detailed, timestamped logs (how the load time was traced) |
 | `./bin/beevmd tenant add <name>` / `tenant ls` | milestone 4: create a tenant (prints its API key once) |
 | `./bin/beevmd key add <tenant>` / `key ls` / `key revoke <prefix>` | milestone 4: manage API keys |
 | `./bin/beevmd serve [--addr A] [--max-vms N] [--queue-wait D] [--s3-*] [--runner snapshot\|cold]` | milestone 4/5/6: run the HTTP service (restores from snapshots by default) |
@@ -1171,11 +1427,17 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 | One invoke over HTTP with snapshot restore | ~130 to 160 ms | 6 |
 | Building a base snapshot (incl. 1 s settle) | 2.1 to 2.5 s | 6 |
 | `make setup` re-run when all done | 0.6 s | 1 |
-| Snapshot restore after tuning, VM ready (p50 / p99 of 100, two runs) | 45-46 / 66-67 ms | 6 refine |
-| Snapshot restore, split (p50): spawn / load / agent | 1.5 / 23 / 21 ms | 6 refine |
-| Page faults after restore: agent ready / upload + call | ~520 / ~1,470 (~37 µs each) | 6 refine |
-| Snapshot restore with a cold page cache, VM ready (p50) | 84 ms | 6 refine |
-| Everything in Balance mode on battery | ~2x slower (boot 1.84 s) | 6 refine |
+| Snapshot restore after tuning, VM ready (p50 / p99 of 100, two runs) | 45.2-45.8 / 65.9-67.2 ms | 6 refine |
+| Snapshot restore, split (p50): spawn / load / agent | 1.5 / 22.8-23.1 / 20.9 ms | 6 refine |
+| Snapshot load, spread over 100 runs | 11 to 34 ms, evenly spread | 6 refine |
+| Our load request vs Firecracker's own load time (p50) | 0.2 to 0.7 ms apart | 6 refine |
+| Agent phase p99: `/health` + `/resume` vs `/resume` only | 37.8-55.1 vs 23.6-26.0 ms | 6 refine |
+| Page faults after restore: agent ready / upload + call | ~520 / ~1,470 | 6 refine |
+| Cost per page fault (nested virtualization) | ~37 µs (agent), ~27 µs (call) | 6 refine |
+| First calls on one restored VM (round trip) | 16.4, 6.3, 4.4 ms | 6 refine |
+| Snapshot restore with a cold page cache, VM ready / agent (p50) | 84.3 / 52.8 ms | 6 refine |
+| Building a base snapshot with the warm-up call | 2.1 s | 6 refine |
+| Everything in Balance mode on battery | ~2-2.5x slower (boot 1.84 s, restore ready 115-120 ms) | 6 refine |
 | Target cold start (snapshot restore) | < 50 ms: p50 met, p99 not on WSL2 (nested virtualization) | 6 |
 
 ## Appendix D: general troubleshooting
@@ -1191,6 +1453,9 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 9. **`make minio` fails to build:** it needs Go and internet access the first time; the MinIO download site no longer serves binaries (410 Gone), which is why it builds from source.
 10. **Restored calls are slow (hundreds of ms) or the server logs "snapshot unavailable, booting instead":** run `./bin/beevmd snapshot build` to see the error; after changing guest code run `make images` (the snapshot is rebuilt automatically; `beevmd snapshot rm --stale` cleans up old ones).
 11. **Running commands from Windows tools into WSL:** put them in a script file and run `wsl.exe -- bash file.sh`, or use `make`; inline `$VARS`, quotes and `|` get mangled. From Git Bash also set `MSYS_NO_PATHCONV=1`, or `/mnt/c/...` paths are rewritten.
+12. **Benchmarks suddenly 2x slower in every phase:** check the power mode (`powercfg /getactivescheme` in PowerShell) and the charger. Benchmark in Legion Performance Mode, plugged in.
+13. **Benchmark tails (p99) differ a lot between identical runs:** that is host noise under nested virtualization. Compare runs made in the same session, and repeat a run before trusting a difference.
+14. **The first `go vet` / `go test` takes minutes:** Go is compiling everything over the Windows-mounted folder (`/mnt/c`). Later runs use the build cache and are fast. Run long commands in the background or with a long timeout.
 
 ## Appendix E: regenerating these documents
 
