@@ -7,6 +7,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"log/slog"
 	"math"
 	"os"
 	"os/exec"
@@ -22,6 +24,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/om8P/BeeVM/internal/pool"
+	"github.com/om8P/BeeVM/internal/runner"
 	"github.com/om8P/BeeVM/internal/snapshot"
 	"github.com/om8P/BeeVM/internal/vmm"
 )
@@ -48,7 +52,7 @@ type benchRun struct {
 var benchMetrics = []struct {
 	name     string
 	get      func(benchRun) float64
-	only     string // "" = every mode
+	only     string // comma-separated modes; "" = every mode
 	optional bool   // left out when every value is 0 (the flag that fills it was not set)
 }{
 	{"spawn", func(r benchRun) float64 { return r.Spawn }, "restore", false},
@@ -59,10 +63,23 @@ var benchMetrics = []struct {
 	{"attempts (n)", func(r benchRun) float64 { return r.Attempts }, "restore", true},
 	{"faults agent (n)", func(r benchRun) float64 { return r.FaultsAg }, "restore", true},
 	{"faults call (n)", func(r benchRun) float64 { return r.FaultsFn }, "restore", true},
-	{"vm ready", func(r benchRun) float64 { return r.Ready }, "", false},
-	{"upload", func(r benchRun) float64 { return r.Upload }, "", false},
-	{"invoke", func(r benchRun) float64 { return r.Invoke }, "", false},
+	{"vm ready", func(r benchRun) float64 { return r.Ready }, "boot,restore", false},
+	{"upload", func(r benchRun) float64 { return r.Upload }, "boot,restore", false},
+	{"invoke", func(r benchRun) float64 { return r.Invoke }, "boot,restore", false},
 	{"first response", func(r benchRun) float64 { return r.First }, "", false},
+}
+
+// metricFor reports whether a row belongs in a mode's part of the table.
+func metricFor(only, mode string) bool {
+	if only == "" {
+		return true
+	}
+	for _, m := range strings.Split(only, ",") {
+		if m == mode {
+			return true
+		}
+	}
+	return false
 }
 
 // benchSettings are the knobs of one benchmark run.
@@ -83,7 +100,7 @@ type benchSettings struct {
 // runBench handles `beevmd bench coldstart`.
 func runBench(args []string) int {
 	if len(args) == 0 || args[0] != "coldstart" {
-		fmt.Fprintln(os.Stderr, "usage: beevmd bench coldstart [--runs N] [--mode boot,restore] [--code F] [--out DIR]")
+		fmt.Fprintln(os.Stderr, "usage: beevmd bench coldstart [--runs N] [--mode boot,restore,warm] [--code F] [--out DIR]")
 		fmt.Fprintln(os.Stderr, "         [--mem N] [--vcpus N] [--probe resume|health] [--gap D] [--cold-cache]")
 		fmt.Fprintln(os.Stderr, "         [--settle D] [--fc-metrics] [--pin CPUS]")
 		return 2
@@ -91,7 +108,7 @@ func runBench(args []string) int {
 	var s benchSettings
 	fs := flag.NewFlagSet("bench coldstart", flag.ExitOnError)
 	fs.IntVar(&s.Runs, "runs", 100, "measured cold starts per mode")
-	modes := fs.String("mode", "boot,restore", "comma-separated: boot, restore")
+	modes := fs.String("mode", "boot,restore", "comma-separated: boot, restore, warm (repeat calls through the warm pool)")
 	fs.StringVar(&s.Code, "code", "bin/functions/hello-go-binary", "function binary to run")
 	fs.StringVar(&s.Payload, "payload", `{"name":"bench"}`, "JSON payload")
 	out := fs.String("out", "bench/results", "folder for the CSV and summary")
@@ -147,8 +164,20 @@ func runBench(args []string) int {
 			rcfg := cfg
 			rcfg.FirecrackerMetrics, rcfg.CPUs = s.FCMetrics, s.Pin
 			one = func(i int) (benchRun, error) { return benchRestore(sigCtx, rcfg, snap, s, i) }
+		case "warm":
+			snap, err = benchSnapshot(sigCtx, home, cfg.BaseDir, s)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "error: snapshot:", err)
+				return exitFor(sigCtx, 1)
+			}
+			// The real warm runner with one slot: the warm-up call restores the VM, every
+			// measured call reuses it.
+			w := runner.NewWarmRunner(cfg, fixedSnapshot{snap}, pool.Config{MaxVMs: 1, KeepAlive: time.Hour},
+				slog.New(slog.NewTextHandler(io.Discard, nil)))
+			defer w.Close()
+			one = func(i int) (benchRun, error) { return benchWarm(sigCtx, w, s, i) }
 		default:
-			fmt.Fprintf(os.Stderr, "error: unknown mode %q (boot or restore)\n", mode)
+			fmt.Fprintf(os.Stderr, "error: unknown mode %q (boot, restore or warm)\n", mode)
 			return 2
 		}
 		fmt.Printf("== %s: 1 warm-up + %d measured runs, one at a time\n", mode, s.Runs)
@@ -288,6 +317,39 @@ func benchRestore(ctx context.Context, cfg vmm.Config, snap snapshot.Snapshot, s
 	return r, nil
 }
 
+// fixedSnapshot hands the warm runner the snapshot the benchmark already chose.
+type fixedSnapshot struct{ snap snapshot.Snapshot }
+
+func (f fixedSnapshot) Ensure(context.Context, int64, int64) (snapshot.Snapshot, error) {
+	return f.snap, nil
+}
+
+// benchWarm measures one call through the warm pool: take the idle VM, call the function, give
+// the VM back. Run 0 (the warm-up) creates the VM; every later run must reuse it.
+func benchWarm(ctx context.Context, w *runner.WarmRunner, s benchSettings, i int) (benchRun, error) {
+	r := benchRun{Mode: "warm", Run: i}
+	code, err := filepath.Abs(s.Code)
+	if err != nil {
+		return r, err
+	}
+	t0 := time.Now()
+	res, err := w.Run(ctx, runner.Request{
+		CodePath: code, Payload: json.RawMessage(s.Payload), MemoryMiB: s.Mem, VCPUs: s.VCPUs, TimeoutMS: 10_000,
+		TenantID: 1, FunctionID: 1, CodeSHA256: "bench",
+	})
+	r.First = ms(time.Since(t0))
+	if err != nil {
+		return r, err
+	}
+	if res.FunctionError != "" {
+		return r, fmt.Errorf("function failed: %s", res.FunctionError)
+	}
+	if i > 0 && res.StartKind != runner.StartWarm {
+		return r, fmt.Errorf("call was %s, not warm: the VM was not reused", res.StartKind)
+	}
+	return r, nil
+}
+
 // benchCall uploads the function and calls it once, filling Upload, Invoke and First.
 func benchCall(ctx context.Context, vm *vmm.VM, s benchSettings, t0 time.Time, r *benchRun) error {
 	t1 := time.Now()
@@ -399,7 +461,7 @@ func benchTable(results []benchRun) string {
 	}
 	for _, mode := range modes {
 		for _, m := range benchMetrics {
-			if m.only != "" && m.only != mode {
+			if !metricFor(m.only, mode) {
 				continue
 			}
 			var v []float64
@@ -479,7 +541,8 @@ func writeBench(dir string, results []benchRun, table string, snap snapshot.Snap
 	fmt.Fprintf(&md, "- **load**: our `PUT /snapshot/load` request (incl. resuming the vCPUs); **fc load**: the same, as Firecracker measured it\n")
 	fmt.Fprintf(&md, "- **agent**: after the load until the guest agent answered `/resume` (clock and entropy fixed); **connect**: until `/health` answered (probe health only)\n")
 	fmt.Fprintf(&md, "- **vm ready**: start until the guest agent is ready (restore: spawn + load + agent)\n")
-	fmt.Fprintf(&md, "- **first response**: start until the function's answer arrived, including uploading its code\n\n")
+	fmt.Fprintf(&md, "- **first response**: start until the function's answer arrived, including uploading its code\n")
+	fmt.Fprintf(&md, "- **warm**: a repeat call through the warm pool (take the idle VM, call, give it back); no restore, no upload\n\n")
 	fmt.Fprintf(&md, "```text\n%s```\n", table)
 	mdPath := filepath.Join(dir, "coldstart-"+stamp+".md")
 	return csvPath, mdPath, os.WriteFile(mdPath, []byte(md.String()), 0o644)

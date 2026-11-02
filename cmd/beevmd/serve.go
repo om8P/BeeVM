@@ -15,6 +15,7 @@ import (
 
 	"github.com/om8P/BeeVM/internal/api"
 	"github.com/om8P/BeeVM/internal/codestore"
+	"github.com/om8P/BeeVM/internal/pool"
 	"github.com/om8P/BeeVM/internal/registry"
 	"github.com/om8P/BeeVM/internal/runner"
 	"github.com/om8P/BeeVM/internal/snapshot"
@@ -43,7 +44,8 @@ func runServe(args []string) int {
 	addr := fs.String("addr", "127.0.0.1:8080", "address to listen on (localhost only by default)")
 	maxVMs := fs.Int("max-vms", 8, "most VMs running at the same time")
 	queueWait := fs.Duration("queue-wait", 5*time.Second, "how long a call waits for a free VM slot before getting 503")
-	runnerKind := fs.String("runner", "snapshot", "how VMs start: snapshot (restore from a base snapshot) or cold (full boot every call)")
+	runnerKind := fs.String("runner", "warm", "how calls get a VM: warm (keep VMs between calls, new ones restored from a snapshot), snapshot (restore for every call) or cold (full boot every call)")
+	keepAlive := fs.Duration("keep-alive", 60*time.Second, "warm runner: how long an idle VM is kept for its function's next call")
 	// Artifact store (S3 API). Without a bucket, code stays on this node's disk only.
 	s3Bucket := fs.String("s3-bucket", os.Getenv("BEEVM_S3_BUCKET"), "S3 bucket for function code (env BEEVM_S3_BUCKET); empty = local disk only")
 	s3Endpoint := fs.String("s3-endpoint", os.Getenv("BEEVM_S3_ENDPOINT"), "S3 endpoint URL for MinIO etc. (env BEEVM_S3_ENDPOINT); empty = AWS S3")
@@ -99,31 +101,54 @@ func runServe(args []string) int {
 		return 1
 	}
 
-	var run runner.Runner
-	switch *runnerKind {
-	case "cold":
-		run = runner.NewColdRunner(base, *maxVMs, *queueWait)
-	case "snapshot":
+	// openSnapshots sets up the Snapshot Manager and builds the default-size snapshot in the
+	// background, so the first call does not wait for it.
+	openSnapshots := func() (*snapshot.Manager, error) {
 		snaps, err := snapshot.New(filepath.Join(home, "snapshots"), base, func(f string, a ...any) {
 			logger.Info(fmt.Sprintf(f, a...))
 		})
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			return 1
+			return nil, err
 		}
 		if n, err := snaps.RemoveStale(); err == nil && n > 0 {
 			logger.Info("removed snapshots that no longer match the images", "count", n)
 		}
-		run = runner.NewSnapshotRunner(base, snaps, *maxVMs, *queueWait, logger)
-		// Build the default-size snapshot now, so the first call does not wait for it.
 		go func() {
 			if _, err := snaps.Ensure(context.Background(), registry.DefaultMemoryMiB, registry.DefaultVCPUs); err != nil {
 				logger.Error("could not build the default snapshot; calls will boot instead", "error", err)
 			}
 		}()
+		return snaps, nil
+	}
+
+	var run runner.Runner
+	switch *runnerKind {
+	case "cold":
+		run = runner.NewColdRunner(base, *maxVMs, *queueWait)
+	case "snapshot", "warm":
+		snaps, err := openSnapshots()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			return 1
+		}
+		if *runnerKind == "snapshot" {
+			run = runner.NewSnapshotRunner(base, snaps, *maxVMs, *queueWait, logger)
+		} else {
+			run = runner.NewWarmRunner(base, snaps, pool.Config{
+				MaxVMs: *maxVMs, KeepAlive: *keepAlive, QueueWait: *queueWait, Logger: logger,
+			}, logger)
+		}
 	default:
-		fmt.Fprintf(os.Stderr, "error: --runner must be snapshot or cold, not %q\n", *runnerKind)
+		fmt.Fprintf(os.Stderr, "error: --runner must be warm, snapshot or cold, not %q\n", *runnerKind)
 		return 2
+	}
+	// The warm pool keeps VMs between calls: destroy them on the way out.
+	closeRunner := func() {
+		if c, ok := run.(interface{ Close() error }); ok {
+			if err := c.Close(); err != nil {
+				logger.Warn("warm pool did not close cleanly", "error", err)
+			}
+		}
 	}
 
 	handler := api.New(api.Deps{
@@ -136,11 +161,12 @@ func runServe(args []string) int {
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
-	logger.Info("listening", "addr", *addr, "max_vms", *maxVMs, "runner", *runnerKind, "home", home)
+	logger.Info("listening", "addr", *addr, "max_vms", *maxVMs, "runner", *runnerKind, "keep_alive", keepAlive.String(), "home", home)
 
 	select {
 	case err := <-errCh:
 		fmt.Fprintln(os.Stderr, "error:", err)
+		closeRunner()
 		return 1
 	case <-sigCtx.Done():
 	}
@@ -157,8 +183,10 @@ func runServe(args []string) int {
 		logger.Warn("shutdown did not finish cleanly", "error", err)
 		_ = srv.Close() // cancels the remaining requests; their VMs are killed and cleaned up
 		time.Sleep(500 * time.Millisecond)
+		closeRunner()
 		return 1
 	}
+	closeRunner()
 	logger.Info("stopped")
 	return 0
 }

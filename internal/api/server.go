@@ -69,7 +69,9 @@ func (s *Server) Handler() http.Handler {
 			r.Put("/{name}", s.putFunction)
 			r.Get("/{name}", s.getFunction)
 			r.Delete("/{name}", s.deleteFunction)
+			r.Post("/{name}/prewarm", s.prewarm)
 		})
+		r.Get("/api/v1/vms", s.listVMs)
 		r.Post("/invoke/{name}", s.invoke)
 	})
 	return r
@@ -89,7 +91,7 @@ type reqInfo struct {
 	tenant  string
 	vmID    string
 	cache   string // "hit" or "miss" for invoke calls
-	start   string // "restore" or "boot" for invoke calls
+	start   string // "warm", "restore" or "boot" for invoke calls
 	fetchMS int64
 }
 

@@ -139,6 +139,9 @@ func (s *Server) putFunction(w http.ResponseWriter, r *http.Request) {
 	if oldSHA != hash {
 		s.releaseCode(oldSHA)
 	}
+	if !created {
+		s.drain(f.ID) // warm VMs still hold the old code or settings
+	}
 	status := http.StatusOK
 	if created {
 		status = http.StatusCreated
@@ -187,7 +190,11 @@ func (s *Server) getFunction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteFunction(w http.ResponseWriter, r *http.Request) {
-	sha, err := s.Registry.DeleteFunction(tenantFrom(r.Context()).ID, chi.URLParam(r, "name"))
+	tenantID, name := tenantFrom(r.Context()).ID, chi.URLParam(r, "name")
+	if f, err := s.Registry.GetFunction(tenantID, name); err == nil {
+		defer s.drain(f.ID) // after the delete, so no new call can start a VM for it
+	}
+	sha, err := s.Registry.DeleteFunction(tenantID, name)
 	if errors.Is(err, registry.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "function not found")
 		return

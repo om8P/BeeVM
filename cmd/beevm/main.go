@@ -1,4 +1,5 @@
-// Command beevm is the user-facing CLI: deploy a function, invoke it, list and remove functions.
+// Command beevm is the user-facing CLI: deploy a function, invoke it, list and remove functions,
+// prewarm VMs and list them.
 //
 // It talks to a running beevmd over HTTP. Settings come from flags or the environment:
 //
@@ -57,7 +58,7 @@ func newRoot() *cobra.Command {
 	}
 	root.PersistentFlags().StringVar(&s.url, "url", "", "server address (default $BEEVM_URL or http://127.0.0.1:8080)")
 	root.PersistentFlags().StringVar(&s.key, "key", "", "API key (default $BEEVM_API_KEY)")
-	root.AddCommand(newDeploy(&s), newInvoke(&s), newLs(&s), newRm(&s))
+	root.AddCommand(newDeploy(&s), newInvoke(&s), newLs(&s), newRm(&s), newPrewarm(&s), newVMs(&s))
 	return root
 }
 

@@ -2,7 +2,8 @@
 //
 // The API server only knows the Runner interface. ColdRunner boots a fresh VM for every
 // call; SnapshotRunner restores one from a base snapshot instead (milestone 6), which is
-// about 25 times faster. The warm pool (M7) will be another Runner.
+// about 25 times faster. WarmRunner (milestone 7) keeps VMs alive between calls in a warm
+// pool, so repeat calls skip the restore and the upload.
 package runner
 
 import (
@@ -28,12 +29,19 @@ type Request struct {
 	MemoryMiB int64
 	VCPUs     int64
 	TimeoutMS int64 // limit for the function itself
+
+	// Which function this is. Only the warm pool uses these: a VM is reused only for calls
+	// of the same function with the same code.
+	TenantID   int64
+	FunctionID int64
+	CodeSHA256 string
 }
 
 // How a VM was started for a call.
 const (
 	StartBoot    = "boot"    // a full boot of a new VM
 	StartRestore = "restore" // restored from a snapshot
+	StartWarm    = "warm"    // an idle VM from the warm pool, code already loaded
 )
 
 // Result is what came back. If FunctionError is set, the VM worked but the function failed
@@ -123,39 +131,63 @@ func (c *ColdRunner) Run(ctx context.Context, req Request) (Result, error) {
 
 // bootAndRun boots a VM, runs the call on it and throws it away. The caller holds a slot.
 func bootAndRun(ctx context.Context, base vmm.Config, req Request) (Result, error) {
+	readyCtx, cancel := context.WithTimeout(ctx, readyTimeout)
+	defer cancel()
+	res := Result{StartKind: StartBoot}
+	vm, err := bootReady(readyCtx, base, req, &res)
+	if err != nil {
+		return res, err
+	}
+	// The VM is disposable: Cleanup kills it at once and deletes its folder. No graceful
+	// shutdown is needed, and skipping it keeps the response fast.
+	defer vm.Cleanup(false)
+	return res, runOn(ctx, readyCtx, vm, req, &res)
+}
+
+// bootReady boots a new VM and waits until its agent answers. It fills in VMID and BootMS.
+// On error nothing is left behind.
+func bootReady(ctx context.Context, base vmm.Config, req Request, res *Result) (*vmm.VM, error) {
 	cfg := base
 	cfg.MemMiB = req.MemoryMiB
 	cfg.VCPUs = req.VCPUs
 	vm, err := vmm.New(cfg)
 	if err != nil {
-		return Result{StartKind: StartBoot}, fmt.Errorf("create vm: %w", err)
+		return nil, fmt.Errorf("create vm: %w", err)
 	}
-	// The VM is disposable: Cleanup kills it at once and deletes its folder. No graceful
-	// shutdown is needed, and skipping it keeps the response fast.
-	defer vm.Cleanup(false)
-	res := Result{VMID: vm.ID(), StartKind: StartBoot}
-
-	readyCtx, cancel := context.WithTimeout(ctx, readyTimeout)
-	defer cancel()
-	if err := vm.Start(readyCtx); err != nil {
-		return res, fmt.Errorf("start vm: %w", err)
+	res.VMID = vm.ID()
+	if err := vm.Start(ctx); err != nil {
+		vm.Cleanup(false)
+		return nil, fmt.Errorf("start vm: %w", err)
 	}
-	boot, err := vm.WaitForAgent(readyCtx)
+	boot, err := vm.WaitForAgent(ctx)
 	if err != nil {
-		return res, fmt.Errorf("wait for agent: %w", err)
+		vm.Cleanup(false)
+		return nil, fmt.Errorf("wait for agent: %w", err)
 	}
 	res.BootMS = boot.Milliseconds()
-	return res, runOn(ctx, readyCtx, vm, req, &res)
+	return vm, nil
 }
 
 // runOn uploads the function to a ready VM and calls it once.
 func runOn(ctx, readyCtx context.Context, vm *vmm.VM, req Request, res *Result) error {
+	if err := uploadCode(readyCtx, vm, req, res); err != nil {
+		return err
+	}
+	return callFunction(ctx, vm, req, res)
+}
+
+// uploadCode sends the function's binary into a ready VM.
+func uploadCode(ctx context.Context, vm *vmm.VM, req Request, res *Result) error {
 	t0 := time.Now()
-	if _, err := vm.Agent().UploadFunctionFile(readyCtx, req.CodePath); err != nil {
+	if _, err := vm.Agent().UploadFunctionFile(ctx, req.CodePath); err != nil {
 		return fmt.Errorf("upload function: %w", err)
 	}
 	res.UploadMS = time.Since(t0).Milliseconds()
+	return nil
+}
 
+// callFunction runs the already uploaded function once and fills in res.
+func callFunction(ctx context.Context, vm *vmm.VM, req Request, res *Result) error {
 	// The agent enforces the function's own limit; allow a little longer so its answer arrives.
 	limit := time.Duration(req.TimeoutMS) * time.Millisecond
 	callCtx, cancelCall := context.WithTimeout(ctx, limit+10*time.Second)
@@ -182,12 +214,8 @@ type Snapshots interface {
 // fall back to a full boot (and building is not retried for a minute).
 type SnapshotRunner struct {
 	limiter
-	base   vmm.Config
-	snaps  Snapshots
-	logger *slog.Logger
-
-	mu          sync.Mutex
-	failedUntil map[[2]int64]time.Time // memory and vCPUs -> do not try to build before
+	snapshotPicker
+	base vmm.Config
 
 	// restore and boot do the work; replaced in unit tests.
 	restore func(ctx context.Context, base vmm.Config, snap snapshot.Snapshot, req Request) (Result, error)
@@ -204,9 +232,23 @@ func NewSnapshotRunner(base vmm.Config, snaps Snapshots, maxVMs int, queueWait t
 		logger = slog.Default()
 	}
 	return &SnapshotRunner{
-		limiter: newLimiter(maxVMs, queueWait), base: agentConfig(base), snaps: snaps, logger: logger,
-		failedUntil: map[[2]int64]time.Time{}, restore: restoreAndRun, boot: bootAndRun,
+		limiter: newLimiter(maxVMs, queueWait), base: agentConfig(base),
+		snapshotPicker: newSnapshotPicker(snaps, logger), restore: restoreAndRun, boot: bootAndRun,
 	}
+}
+
+// snapshotPicker finds the base snapshot for a call's VM size, and remembers sizes whose
+// snapshot could not be built so those calls boot instead for a while.
+type snapshotPicker struct {
+	snaps  Snapshots
+	logger *slog.Logger
+
+	mu          sync.Mutex
+	failedUntil map[[2]int64]time.Time // memory and vCPUs -> do not try to build before
+}
+
+func newSnapshotPicker(snaps Snapshots, logger *slog.Logger) snapshotPicker {
+	return snapshotPicker{snaps: snaps, logger: logger, failedUntil: map[[2]int64]time.Time{}}
 }
 
 // Run implements Runner.
@@ -230,7 +272,7 @@ func (s *SnapshotRunner) Run(ctx context.Context, req Request) (Result, error) {
 
 // snapshotFor returns the snapshot for this call's VM size, building it if needed. It reports
 // false when there is none and the call should boot instead.
-func (s *SnapshotRunner) snapshotFor(ctx context.Context, req Request) (snapshot.Snapshot, bool) {
+func (s *snapshotPicker) snapshotFor(ctx context.Context, req Request) (snapshot.Snapshot, bool) {
 	size := [2]int64{req.MemoryMiB, req.VCPUs}
 	s.mu.Lock()
 	until := s.failedUntil[size]
@@ -258,22 +300,32 @@ func restoreAndRun(ctx context.Context, base vmm.Config, snap snapshot.Snapshot,
 	res := Result{StartKind: StartRestore}
 	readyCtx, cancel := context.WithTimeout(ctx, readyTimeout)
 	defer cancel()
-
-	cfg := base
-	cfg.MemMiB, cfg.VCPUs = req.MemoryMiB, req.VCPUs // informational; the snapshot decides
-	vm, _, err := vmm.Restore(readyCtx, cfg, snap.Files)
+	vm, err := restoreReady(readyCtx, base, snap, req, &res)
 	if err != nil {
-		return res, fmt.Errorf("restore vm: %w", err)
+		return res, err
 	}
 	defer vm.Cleanup(false)
+	return res, runOn(ctx, readyCtx, vm, req, &res)
+}
+
+// restoreReady restores a VM from snap and waits until its agent answers. It fills in VMID and
+// BootMS. On error nothing is left behind.
+func restoreReady(ctx context.Context, base vmm.Config, snap snapshot.Snapshot, req Request, res *Result) (*vmm.VM, error) {
+	cfg := base
+	cfg.MemMiB, cfg.VCPUs = req.MemoryMiB, req.VCPUs // informational; the snapshot decides
+	vm, _, err := vmm.Restore(ctx, cfg, snap.Files)
+	if err != nil {
+		return nil, fmt.Errorf("restore vm: %w", err)
+	}
 	res.VMID = vm.ID()
 
 	// The restored guest's clock is behind and its random state is a copy: the first request
 	// that reaches the agent fixes both, and its answer also means the agent is ready.
-	info, err := vm.WaitAndResume(readyCtx)
+	info, err := vm.WaitAndResume(ctx)
 	if err != nil {
-		return res, fmt.Errorf("wait for agent: %w", err)
+		vm.Cleanup(false)
+		return nil, fmt.Errorf("wait for agent: %w", err)
 	}
 	res.BootMS = info.Ready.Milliseconds()
-	return res, runOn(ctx, readyCtx, vm, req, &res)
+	return vm, nil
 }
