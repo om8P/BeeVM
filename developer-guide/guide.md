@@ -16,7 +16,8 @@ It grows with the project: each finished milestone adds a section. The reasons b
 | Part 6: Milestone 4, HTTP API, registry and CLI | Done |
 | Part 7: Milestone 5, artifact store with MinIO / S3 | Done |
 | Part 8: Milestone 6, snapshots and fast restore | Done, refined (8.10); userfaultfd spike deferred (8.11) |
-| Part 9: the repository, GitHub and renames | Done |
+| Part 9: Milestone 7, the warm pool | Done |
+| Part 10: the repository, GitHub and renames | Done |
 | Appendices: cheat sheet, versions, numbers, troubleshooting, regenerating these documents | — |
 
 ---
@@ -43,7 +44,8 @@ Every step in order. Each one is explained in the parts below.
 | 14 | WSL, second terminal | `export BEEVM_API_KEY=<key>`, `./bin/beevm deploy hello bin/functions/hello-go-binary`, `./bin/beevm invoke hello --payload '{"name":"Om"}' -v` | 6.3 |
 | 15 | WSL, optional | Milestone 5: stop the server, run `make minio` in one terminal, then in another `set -a; . deploy/minio.env; set +a` and `./bin/beevmd serve`; deploy and invoke again | 7.3, 7.4 |
 | 16 | WSL | Milestone 6: `make images build`, then `./bin/beevmd invoke --restore --code bin/functions/hello-go-binary` and `./bin/beevmd bench coldstart --runs 100` (boot vs restore) | 8.6, 8.7 |
-| 17 | WSL | `make test && make test-kvm` (all tests; `make test-s3` too if MinIO is running) | 4.4, 5.7, 6.5, 7.5, 8.8 |
+| 17 | WSL | Milestone 7: with `./bin/beevmd serve` running, call `./bin/beevm invoke hello -v` twice (the second says `warm`), then `./bin/beevm vms`; `./bin/beevmd bench coldstart --mode restore,warm` | 9.7, 9.8 |
+| 18 | WSL | `make test && make test-kvm` (all tests; `make test-s3` too if MinIO is running) | 4.4, 5.7, 6.5, 7.5, 8.8, 9.9 |
 
 ---
 
@@ -125,7 +127,7 @@ Tell Git who you are (it is written into every commit, and is public on GitHub):
 
 ```bash
 git config --global user.name "Your Name"
-git config --global user.email "you@example.com"     # or GitHub's no-reply address, see Part 9.4
+git config --global user.email "you@example.com"     # or GitHub's no-reply address, see Part 10.4
 ```
 
 Everything else (Go, Firecracker, kernel, image) is installed by `make setup` in Part 3.
@@ -327,7 +329,7 @@ Already done in the repo; for a fresh clone you only need:
 make build         # downloads Go dependencies the first time, builds bin/beevmd
 ```
 
-For the record, the module was created with the commands below (it was first named after the old GitHub account; see Part 9.3 for the renames):
+For the record, the module was created with the commands below (it was first named after the old GitHub account; see Part 10.3 for the renames):
 
 ```bash
 go mod init github.com/om8P/BeeVM
@@ -1259,11 +1261,192 @@ The "user-mode only" kind is no use: it only catches faults caused by user progr
 
 ---
 
-## Part 9: the repository, GitHub and renames
+## Part 9: Milestone 7, the warm pool
+
+**Goal:** the fast path for repeat calls. After milestone 6 every call still restored a new VM, uploaded the code, ran it once and killed the VM: about 90 ms. Most functions are called again soon after, so BeeVM now **keeps the VM** after a call. The next call of the same function finds it waiting, with the code already inside, and only has to run the function: about **1.6 ms** inside the server.
+
+### 9.1 What a warm pool is
+
+A **warm pool** is a set of VMs that are already running and already hold one function's code, waiting for that function's next call. "Cold" means the call had to create a VM (restore or boot); "warm" means it reused one. AWS Lambda does the same with its execution environments.
+
+Three rules decide how the pool behaves:
+
+| Rule | Why |
+|---|---|
+| A VM only ever serves **one function**: same tenant, same function, same code hash, same memory and vCPUs. This combination is the pool **key** | A function may leave files in `/tmp` or processes behind. Sharing VMs between functions, even ones with identical code, would let one tenant see another's leftovers. A redeploy changes the code hash, so old VMs are never reused for new code |
+| An idle VM is kept for the **keep-alive** time (default 60 s), then destroyed | Idle VMs cost memory; a function nobody calls should not hold any |
+| The node has one limit, `--max-vms`, that counts **every** VM, idle ones included. When it is full, the idle VM that was used **least recently** is destroyed to make room (**LRU** eviction) | A VM that has not been used for the longest time is the least likely to be needed soon |
+
+### 9.2 What was added
+
+| File | What it holds |
+|---|---|
+| `internal/pool/state.go` | The VM states and the table of allowed moves between them |
+| `internal/pool/pool.go` | The pool: `Acquire`, `Release`, `Prewarm`, `Drain`, `Stats`, `Close`, the reaper. It does not import any Firecracker code: it manages anything with `ID()`, `Exited()` and `Destroy()` |
+| `internal/runner/warm_runner.go` | `WarmRunner`: makes VMs for the pool (restore, `/resume`, upload) and runs calls on them. The new default runner |
+| `internal/runner/runner.go` | The restore/boot helpers were split into smaller pieces (`restoreReady`, `bootReady`, `uploadCode`, `callFunction`) so both runners use them; `Request` now carries the tenant, function ID and code hash |
+| `internal/api/pool.go` | `POST /api/v1/functions/{name}/prewarm` and `GET /api/v1/vms`; redeploy and delete throw away the function's VMs |
+| `cmd/beevm/commands.go` | `beevm prewarm` and `beevm vms`; `beevm invoke -v` prints `warm` |
+| `cmd/beevmd/serve.go`, `bench.go` | `--runner warm` (default) and `--keep-alive`; the benchmark's `--mode warm` |
+
+No new libraries.
+
+### 9.3 The life of a VM: a state machine
+
+Every VM in the pool is in exactly one **state**, and it can only move between states along the arrows below. Writing the rules down as one table (`allowed` in `state.go`) means a wrong move is caught immediately as an error instead of quietly corrupting the pool, and a single test can check every possible pair of states.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Restoring
+    Restoring --> Idle: prewarmed
+    Restoring --> Busy: created for a call
+    Restoring --> Destroyed: restore failed
+    Idle --> Busy: warm hit
+    Idle --> Recycling: keep-alive over, evicted, drained, crashed, shutdown
+    Busy --> Idle: call ended, VM healthy
+    Busy --> Recycling: call went wrong, or function changed
+    Recycling --> Destroyed: killed, folder deleted
+    Destroyed --> [*]
+```
+
+| State | Meaning | Counts against `--max-vms`? |
+|---|---|---|
+| Restoring | being created: restored (or booted) and given the code | yes |
+| Idle | ready, waiting for a call of its function | yes |
+| Busy | running a call | yes |
+| Recycling | being killed and cleaned up | yes (its memory is not free yet) |
+| Destroyed | gone; the pool forgets it | no |
+
+### 9.4 How a call gets a VM
+
+`Pool.Acquire(key)` tries four things in order:
+
+```mermaid
+flowchart TD
+    A[Acquire for function's key] --> B{Idle VM with this key?}
+    B -- yes --> W[Take the most recently used one: warm, about 1 ms]
+    B -- no --> C{Node full?}
+    C -- yes --> D{Any idle VM of any function?}
+    D -- yes --> E[Recycle the least recently used one, wait until it is gone]
+    E --> C
+    D -- no --> F[Wait for a change; after the queue wait: 503]
+    F --> B
+    C -- no --> G[Reserve a slot as Restoring, restore + upload without the lock]
+    G --> H[Busy: cold call, about 90 ms]
+```
+
+After the call, `Release(healthy)` either puts the VM back as **Idle** or sends it to **Recycling** (see 9.6). Among several idle VMs of one function, the most recently used one is taken: its memory pages are the most likely to be loaded already.
+
+### 9.5 The Go concurrency behind it
+
+Many HTTP requests call the pool at the same time, each in its own goroutine. Four techniques keep that correct:
+
+1. **One mutex for the list of VMs.** Every read or change of the pool's map happens while holding `p.mu`. One lock is simple and fast enough: each locked section only walks a small map.
+2. **Never hold the lock during slow work.** Creating a VM takes tens of milliseconds and destroying one a few. If the lock were held meanwhile, every other call, even warm ones, would wait. So `Acquire` reserves a slot (a `Restoring` entry) under the lock, **unlocks**, restores, then locks again to record the result. Destroying runs in its own goroutine.
+3. **A broadcast channel for waiting calls.** When the node is full, a call must sleep until something changes (a VM is released or destroyed) but must also give up after `--queue-wait` or when its HTTP caller hangs up. Go's `select` can wait on all three only if "something changed" is a channel. The trick: the pool keeps a channel `changed`; waiters receive from it; on every change the pool **closes** it (a closed channel wakes every receiver at once) and puts a fresh one in its place.
+
+   ```go
+   func (p *Pool) broadcastLocked() {
+   	close(p.changed)                 // wake everyone waiting
+   	p.changed = make(chan struct{})  // the next round waits on a new channel
+   }
+   ```
+
+4. **A reaper goroutine.** A `time.Ticker` wakes it regularly (every second, or faster for short keep-alives) to recycle VMs that have been idle for longer than the keep-alive. Its logic is a plain method `reap(now)`, so the tests call it with a **fake clock** instead of really waiting a minute.
+
+The **race detector** (`go test -race`) checks the result: it watches every memory access while the tests run and reports two goroutines touching the same data without a lock. The pool's tests include a stress test with 40 goroutines.
+
+### 9.6 When a VM is kept, and when it is thrown away
+
+| After the call... | VM | Why |
+|---|---|---|
+| succeeded | kept (Idle) | |
+| the function failed normally (non-zero exit, bad output) | kept | the VM is fine, only the function's answer was |
+| the function **timed out** | thrown away | the agent kills the function's process group, but anything it started in the background could survive |
+| the agent or the vsock connection failed | thrown away | the VM is in an unknown state |
+| the HTTP caller hung up mid-call | thrown away | the call may still be running inside the VM |
+| the firecracker process ended by itself | thrown away | noticed through `vm.Exited()`, also while idle |
+| the function was redeployed or deleted | thrown away | idle VMs at once, busy ones when their call ends (`Drain`) |
+
+### 9.7 Use it
+
+The warm runner is the default; nothing changes in how you start the server. The new flags are `--keep-alive` and, to compare, `--runner snapshot` (restore every call, as in milestone 6) or `--runner cold`.
+
+```bash
+./bin/beevmd serve --keep-alive 60s          # first terminal
+./bin/beevm invoke hello --payload '{"name":"Om"}' -v    # second terminal, three times
+./bin/beevm vms
+```
+
+```text
+vm 91e308e0: restore 40 ms, upload 23 ms, function 13 ms, server total 79 ms, round trip 82 ms
+vm 91e308e0: warm, function 1 ms, server total 2 ms, round trip 6 ms
+vm 91e308e0: warm, function 1 ms, server total 1 ms, round trip 5 ms
+
+VM        FUNCTION  STATE  FOR  CALLS
+91e308e0  hello     idle   0s   3
+```
+
+The same VM served all three calls. After the keep-alive, `beevm vms` says `no VMs running` and its folder in `~/.beevm/run/serve/` is gone.
+
+**Prewarm** starts idle VMs before any call arrives, for example before a demo or an expected burst:
+
+```bash
+./bin/beevm prewarm hello -n 2
+```
+
+```text
+started 2 of 2 VMs for hello in 344 ms
+```
+
+It only uses free slots (it never pushes out other functions' VMs) and the VMs expire after the keep-alive like any idle VM. Over HTTP: `POST /api/v1/functions/hello/prewarm?count=2` answers `{"requested":2,"started":2}`; `GET /api/v1/vms` lists your own VMs (never another tenant's).
+
+### 9.8 Measure it
+
+```bash
+./bin/beevmd bench coldstart --runs 100 --mode restore,warm
+```
+
+The warm mode uses the real `WarmRunner` with one slot: the warm-up call restores the VM, and each of the 100 measured calls must reuse it (the benchmark fails otherwise). Results (WSL2, Performance mode):
+
+| ms | p50 | p90 | p99 | max |
+|---|---|---|---|---|
+| restore: VM ready | 44.2 | 52.2 | 60.8 | 61.4 |
+| restore: first response (incl. upload + call) | 88.4 | 101.2 | 113.6 | 156.3 |
+| **warm: first response** | **1.6** | 2.7 | **5.0** | 10.0 |
+
+A warm call is about **55 times faster** than a restore. The pool's own bookkeeping takes microseconds; the 1.6 ms is the vsock round trip to the agent and starting the function's process inside the guest. Over HTTP with the CLI the round trip is 5 to 6 ms.
+
+### 9.9 Tests
+
+```bash
+make test        # new: pool (25), warm runner (7), API prewarm / VM list / drain (5), client, benchmark table
+make test-kvm    # new: 4 end-to-end warm-pool tests
+go test -race ./internal/pool ./internal/runner ./internal/api
+```
+
+The pool's unit tests use fake VMs and a fake clock, so they run in about a second without KVM. They check every pair of states (legal and illegal moves), warm hits, separate VMs for parallel calls, reaping after the keep-alive, LRU eviction, 503 after the wait, a caller hanging up while waiting, a failed restore freeing its slot, VMs crashing while idle or busy, draining (also while a VM is still being created), prewarm, shutdown, and a 40-goroutine stress test that must never exceed the limit.
+
+The KVM tests prove on real VMs: repeat calls reuse the VM (restore 105 ms, warm 1 to 4 ms); nothing is left after the keep-alive; prewarm, redeploy and delete work; **two functions deployed from the same binary cannot see each other's `/tmp` files**, while one function finds its own file again on its warm VM; a timeout replaces the VM and a normal failure keeps it; 10 parallel calls on 2 slots make exactly 2 restores and 8 warm calls. All earlier tests still pass.
+
+### 9.10 Decisions and things to know
+
+| Topic | What we found or decided |
+|---|---|
+| The first call on a **prewarmed** VM takes ~16 ms, not ~1 ms | Its code was uploaded but never run, so the guest memory needed to run it is still loaded lazily (the page faults from 8.10). A later refine could make a throw-away call during prewarm, or prefetch pages (8.11) |
+| `/tmp` keeps its files between warm calls of the same function | Same as AWS Lambda. Functions must not rely on it, but may use it as a cache. It never crosses functions |
+| A VM being recycled still counts against `--max-vms` | Its memory is only free once the process is gone, so a call that needs a slot waits the few milliseconds the kill takes |
+| LRU eviction works across all tenants | One busy tenant can push out another's idle VMs. Per-tenant limits belong with isolation (milestone 9) |
+| Idle VMs are not paused | Their vCPU is halted anyway. Pausing to save CPU is a refine idea; measure first |
+| `Restore`'s VM outlives the request that created it | Already true since milestone 2: the firecracker process is tied to its own context, not the caller's |
+
+---
+
+## Part 10: the repository, GitHub and renames
 
 What we did, so you can do the same for your own fork or a new repository.
 
-### 9.1 Create and publish the repository
+### 10.1 Create and publish the repository
 
 ```bash
 gh auth login                                   # once: log the GitHub CLI in
@@ -1272,7 +1455,7 @@ gh repo create <user>/beevm --public --source=. --remote=origin --push
 
 `gh repo create ... --source=. --push` creates the repository on GitHub, adds it as `origin` and pushes the current branch. We chose **public** so the group and graders can see it.
 
-### 9.2 Removing a file from history before going public
+### 10.2 Removing a file from history before going public
 
 The first commit contained the course case-study `.docx`. Deleting it in a new commit would still leave it in the history, visible to anyone. So, before the first push, we rewrote the local history:
 
@@ -1304,7 +1487,7 @@ flowchart LR
 - Git's own documentation now recommends `git filter-repo` for this job; `filter-branch` was enough for four local commits.
 - When you are sure you do not need it: `git branch -D backup-before-rewrite`.
 
-### 9.3 Renames: repository, module path, GitHub username
+### 10.3 Renames: repository, module path, GitHub username
 
 The Go module path is both the name in every `import` line and the address other people download the code from, so it should always match the repository.
 
@@ -1316,12 +1499,12 @@ The Go module path is both the name in every `import` line and the address other
 
 To find every old reference before a rename: `grep -rIl "old-name" --exclude-dir=.git --exclude-dir=node_modules .`
 
-### 9.4 Things to know about commits
+### 10.4 Things to know about commits
 
 - Commit author name and email come from `git config` and are **public** on GitHub. To hide your email, use GitHub's no-reply address: `git config --global user.email "<id>+<username>@users.noreply.github.com"`. Old commits keep the old values.
 - Every milestone ends with: tests pass, `docs/progress.md` updated, one commit.
 
-### 9.5 The documentation folders
+### 10.5 The documentation folders
 
 | Folder | For whom | In Git |
 |---|---|---|
@@ -1329,7 +1512,7 @@ To find every old reference before a rename: `grep -rIl "old-name" --exclude-dir
 | `developer-guide/` | people: this guide (`guide.md`, plus a Word copy) and the learning notes (`learning-notes.docx`) | yes, the documents only |
 | `developer-guide/tools/` | the scripts that generate the Word files | no (local only, see Appendix E) |
 
-### 9.6 Commit history on GitHub
+### 10.6 Commit history on GitHub
 
 | Commit | What |
 |---|---|
@@ -1349,6 +1532,10 @@ To find every old reference before a rename: `grep -rIl "old-name" --exclude-dir
 | `afd078b` | update guide and learning notes through milestone 5 |
 | `1488561` | demonstration script for milestones 1 to 5 |
 | `56d718e` | Milestone 6 |
+| `6c763bd` | update guide and learning notes for milestone 6 |
+| `e5d30d2` | Milestone 6 refine: faster, steadier snapshot restore (with the userfaultfd spike) |
+| `8c3618d` | document the milestone 6 refines in full detail |
+| `b5029e4` | Milestone 7 |
 
 ---
 
@@ -1369,16 +1556,18 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 | `./bin/beevmd boot [--hold D] [--keep-logs] [--mem N] [--vcpus N]` | milestone 2: boot, show console, stop |
 | `./bin/beevmd invoke --code F [--payload J] [--repeat N] [--timeout D] [--console] [--keep-logs] [--restore]` | milestone 3: run a function in a VM (`--restore`: from the base snapshot, milestone 6) |
 | `./bin/beevmd snapshot build [--mem N --vcpus N]` / `ls` / `rm <key>` / `rm --stale` | milestone 6: manage base snapshots |
-| `./bin/beevmd bench coldstart [--runs N] [--mode boot,restore]` | milestone 6: p50/p90/p99 of boot vs restore, saved to `bench/results/` |
+| `./bin/beevmd bench coldstart [--runs N] [--mode boot,restore,warm]` | milestone 6/7: p50/p90/p99 of boot vs restore vs warm calls, saved to `bench/results/` |
 | `./bin/beevmd bench coldstart … [--probe resume\|health] [--fc-metrics] [--cold-cache] [--settle D] [--gap D] [--pin CPUS] [--mem N] [--out DIR]` | M6 refine: tuning experiments (see 8.10.3) |
 | `powercfg /getactivescheme` (PowerShell) | check the power mode before benchmarking (Performance mode, plugged in) |
 | `firecracker --api-sock S --level Trace --show-level --show-log-origin` | Firecracker with detailed, timestamped logs (how the load time was traced) |
 | `./bin/beevmd tenant add <name>` / `tenant ls` | milestone 4: create a tenant (prints its API key once) |
 | `./bin/beevmd key add <tenant>` / `key ls` / `key revoke <prefix>` | milestone 4: manage API keys |
-| `./bin/beevmd serve [--addr A] [--max-vms N] [--queue-wait D] [--s3-*] [--runner snapshot\|cold]` | milestone 4/5/6: run the HTTP service (restores from snapshots by default) |
+| `./bin/beevmd serve [--addr A] [--max-vms N] [--queue-wait D] [--s3-*] [--runner warm\|snapshot\|cold] [--keep-alive D]` | milestone 4-7: run the HTTP service (warm pool by default: VMs kept `--keep-alive`, default 60 s, new ones restored from snapshots) |
 | `./bin/beevm deploy <name> <binary> [--memory M] [--vcpus N] [--timeout D]` | upload a function (needs `BEEVM_API_KEY`) |
 | `./bin/beevm invoke <name> [--payload J \| --payload-file F] [-v]` | call a function; `-v` prints timings and code cache hit/miss |
 | `./bin/beevm ls` / `rm <name>` | list or delete your functions |
+| `./bin/beevm prewarm <name> [-n N]` | milestone 7: start N idle VMs so the next calls are warm |
+| `./bin/beevm vms` | milestone 7: list your VMs in the warm pool and their states |
 | `make minio` / `make minio-up` / `make minio-down` | milestone 5: local S3 server (built from source) or via Docker Compose |
 | `set -a; . deploy/minio.env; set +a` | load the S3 settings and dev credentials into this terminal |
 | `make test` / `make test-kvm` / `make test-s3` / `make vet` | Go tests and checks (`test-s3` needs MinIO running) |
@@ -1439,6 +1628,11 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 | Building a base snapshot with the warm-up call | 2.1 s | 6 refine |
 | Everything in Balance mode on battery | ~2-2.5x slower (boot 1.84 s, restore ready 115-120 ms) | 6 refine |
 | Target cold start (snapshot restore) | < 50 ms: p50 met, p99 not on WSL2 (nested virtualization) | 6 |
+| **Warm call through the pool, inside the server (p50 / p99 of 100)** | **1.6 / 5.0 ms** | 7 |
+| Restore + upload + first call in the same run (p50 / p99) | 88.4 / 113.6 ms | 7 |
+| Warm call over HTTP with the CLI, round trip | 5 to 6 ms | 7 |
+| First call on a prewarmed VM (code uploaded, never run) | ~16 ms | 7 |
+| Prewarming 2 VMs in parallel | ~344 ms | 7 |
 
 ## Appendix D: general troubleshooting
 
@@ -1455,7 +1649,8 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 11. **Running commands from Windows tools into WSL:** put them in a script file and run `wsl.exe -- bash file.sh`, or use `make`; inline `$VARS`, quotes and `|` get mangled. From Git Bash also set `MSYS_NO_PATHCONV=1`, or `/mnt/c/...` paths are rewritten.
 12. **Benchmarks suddenly 2x slower in every phase:** check the power mode (`powercfg /getactivescheme` in PowerShell) and the charger. Benchmark in Legion Performance Mode, plugged in.
 13. **Benchmark tails (p99) differ a lot between identical runs:** that is host noise under nested virtualization. Compare runs made in the same session, and repeat a run before trusting a difference.
-14. **The first `go vet` / `go test` takes minutes:** Go is compiling everything over the Windows-mounted folder (`/mnt/c`). Later runs use the build cache and are fast. Run long commands in the background or with a long timeout.
+14. **Calls are never `warm` (always `restore`):** check the server runs with `--runner warm` (the default), that calls come faster than `--keep-alive`, and that nothing redeployed the function in between (a redeploy throws its VMs away). Timeouts and agent errors also replace the VM on purpose. `beevm vms` shows what the pool holds.
+15. **The first `go vet` / `go test` takes minutes:** Go is compiling everything over the Windows-mounted folder (`/mnt/c`). Later runs use the build cache and are fast. Run long commands in the background or with a long timeout.
 
 ## Appendix E: regenerating these documents
 
