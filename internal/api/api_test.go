@@ -52,6 +52,16 @@ type env struct {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
+	fr := &fakeRunner{result: runner.Result{
+		Output: json.RawMessage(`{"ok":true}`), VMID: "vm123", BootMS: 1700, FunctionMS: 4, TotalMS: 1800,
+		StartKind: runner.StartRestore, UploadMS: 70,
+	}}
+	return newEnvWith(t, fr, fr)
+}
+
+// newEnvWith builds the test server around run (fr is the fakeRunner inside it, if any).
+func newEnvWith(t *testing.T, run runner.Runner, fr *fakeRunner) *env {
+	t.Helper()
 	reg, err := registry.Open(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -59,12 +69,8 @@ func newEnv(t *testing.T) *env {
 	t.Cleanup(func() { reg.Close() })
 	codeDir := t.TempDir()
 	code, _ := codestore.New(codeDir)
-	fr := &fakeRunner{result: runner.Result{
-		Output: json.RawMessage(`{"ok":true}`), VMID: "vm123", BootMS: 1700, FunctionMS: 4, TotalMS: 1800,
-		StartKind: runner.StartRestore, UploadMS: 70,
-	}}
 	srv := New(Deps{
-		Registry: reg, Code: code, Runner: fr,
+		Registry: reg, Code: code, Runner: run,
 		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 		MaxUploadBytes: 4096, MaxPayloadBytes: 1024,
 	})

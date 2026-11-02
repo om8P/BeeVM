@@ -14,7 +14,7 @@ const (
 	HeaderVMID       = "X-BeeVM-VM-Id"
 	HeaderCodeCache  = "X-BeeVM-Code-Cache" // "hit" (code was on the node) or "miss" (fetched from the artifact store)
 	HeaderFetchMS    = "X-BeeVM-Fetch-Ms"   // time spent fetching the code; 0 on a hit
-	HeaderStart      = "X-BeeVM-Start"      // how the VM started: "restore" (from a snapshot) or "boot"
+	HeaderStart      = "X-BeeVM-Start"      // how the VM started: "warm" (reused from the pool), "restore" (from a snapshot) or "boot"
 	HeaderUploadMS   = "X-BeeVM-Upload-Ms"  // time spent sending the code into the VM
 )
 
@@ -41,6 +41,27 @@ type FunctionConfig struct {
 // FunctionList is the answer to GET /api/v1/functions.
 type FunctionList struct {
 	Functions []Function `json:"functions"`
+}
+
+// PrewarmResult is the answer to POST /api/v1/functions/{name}/prewarm.
+type PrewarmResult struct {
+	Requested int `json:"requested"`
+	Started   int `json:"started"` // fewer than requested when the node had no more free slots
+}
+
+// VM is one of the caller's MicroVMs in the warm pool.
+type VM struct {
+	ID       string    `json:"id"`
+	Function string    `json:"function"` // empty if the function was just removed
+	State    string    `json:"state"`    // restoring, idle, busy, recycling
+	Since    time.Time `json:"since"`    // when it entered State
+	LastUsed time.Time `json:"last_used"`
+	Calls    int64     `json:"calls"`
+}
+
+// VMList is the answer to GET /api/v1/vms.
+type VMList struct {
+	VMs []VM `json:"vms"`
 }
 
 // Error is the body of every error answer. For a failed function (HTTP 502) ExitCode and

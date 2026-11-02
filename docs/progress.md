@@ -13,7 +13,7 @@ Details of each milestone: `docs/milestones.md`.
 | 4 | HTTP API, registry and CLI | Done |
 | 5 | Artifact store with MinIO/S3 | Done |
 | 6 | Snapshots and fast restore (the core) | Done, refined once (restore p50 45 ms; p99 60-67 ms on WSL2, set by KVM load noise and page faults under nested virtualization; page prefetch needs root on WSL, deferred to the cloud node) |
-| 7 | Warm pool | Not started |
+| 7 | Warm pool | Done (warm call p50 1.6 ms, p99 5.0 ms in the server; restore + first call 88 ms) |
 | 8 | Python and Node.js runtimes, function snapshots | Not started |
 | 9 | Isolation and networking | Not started |
 | 10 | Observability (optional module) | Not started |
@@ -149,3 +149,31 @@ Status values: Not started · In progress · Done · Done, needs refinement (say
 - **Spike in WSL:** `CONFIG_USERFAULTFD=y` (also `_WP`, `_MINOR`, `PTE_MARKER_UFFD_WP`), but `vm.unprivileged_userfaultfd = 0`, `/dev/userfaultfd` is `crw------- root root`, `CapEff: 0`, `ptrace_scope 1`. Test as normal user: full userfaultfd "Operation not permitted", user-mode-only OK (useless: KVM's faults happen in the kernel), `/dev/userfaultfd` "Permission denied". **Cannot work without a system change.**
 - **Decision (user):** don't loosen the laptop's security setting (full userfaultfd is a known kernel-exploit helper; the setfacl would also reset on every WSL restart). Try it on the cloud node (M13, note added to `docs/milestones.md`), where Firecracker runs with root/jailer and without nested virtualization. Guide section 8.11.
 - **Next:** milestone 7 (warm pool).
+
+### 2026-11-03: Milestone 7 (warm pool)
+- **Idea:** keep a VM after its call; the next call of the same function reuses it (no restore, no upload). Plan: `C:\Users\ommga\.claude\plans\give-plan-humming-wilkes.md` (agreed: prewarm as an on-demand endpoint, VM list included).
+- **`internal/pool`** (no Firecracker imports, tested with fake VMs and a fake clock):
+  - State machine `Restoring → Idle → Busy → Recycling → Destroyed` in `state.go`; one table of allowed moves, every other move is an error.
+  - Pool key = tenant + function ID + code SHA-256 + memory + vCPUs: VMs are never shared between functions, even with identical code (a file in `/tmp` stays inside one function's VMs). A redeploy changes the key.
+  - `Acquire`: newest idle VM of the key (warm), else a new one if a slot is free, else evict the least recently used idle VM of any function (LRU), else wait up to `QueueWait` (ErrBusy). Waiters sleep on a "broadcast channel" (closed and replaced on every change). The mutex is never held while creating or destroying a VM.
+  - `MaxVMs` counts every state except Destroyed (idle VMs use memory too). Reaper goroutine: idle longer than `KeepAlive` → recycled. A VM whose process exits while idle is removed; while busy it is not reused.
+  - `Release(healthy)`, `Prewarm` (only free slots, never evicts, parallel creates), `Drain(functionID)` (idle now, busy after its call, restoring when ready), `Stats(tenant)`, `Close(ctx)`.
+- **`runner.WarmRunner`** (new default): creates VMs with the M6 path (restore + `/resume`, boot fallback via the shared `snapshotPicker`) and uploads the code once. After a call the VM is kept unless the agent/connection failed, the caller hung up, or the function timed out (`timeout after` prefix); a normal function failure keeps it. Refactor: `bootReady`, `restoreReady`, `uploadCode`, `callFunction` split out of the old helpers (behaviour unchanged). `Request` gained `TenantID, FunctionID, CodeSHA256`; `StartWarm = "warm"`; optional interfaces `Prewarmer`, `Drainer`, `VMLister`.
+- **API/CLI:** `X-BeeVM-Start: warm` (boot and upload 0); redeploy and delete drain the function's VMs; `POST /api/v1/functions/{name}/prewarm?count=N` (1..max-vms; 404, 501 without a pool, 503 full) + `beevm prewarm <name> -n N`; `GET /api/v1/vms` (own tenant only) + `beevm vms`; `beevm invoke -v` prints `warm`.
+- **Serve:** `--runner warm|snapshot|cold` (warm default), `--keep-alive 60s`; the pool is closed on shutdown (no VMs left). **Bench:** `--mode warm` (real WarmRunner, 1 slot; every measured call must be warm).
+- **Verified:** unit tests incl. `-race` for pool (25 tests: every transition pair, warm hit, separate VMs for parallel calls, TTL with fake clock, LRU, busy, cancel, failed create, crash while idle/busy, drain incl. while creating, prewarm, close, 40-goroutine stress), runner (7), api (5), apiclient, bench table; `go vet` (also `-tags kvm`), gofmt; full `make test-kvm` (179 passing) with 4 new end-to-end warm tests: repeat calls reuse the VM (restore 105 ms vs warm 1-4 ms server total), reap after keep-alive leaves no process/folder, prewarm, redeploy and delete drain; two functions with the same code do not see each other's `/tmp/secret`; timeout replaces the VM, normal failure keeps it; 10 parallel calls on 2 slots = 2 restores + 8 warm. Hand check (throw-away `BEEVM_HOME`, keep-alive 3 s): restore 79 ms, then warm 2 / 1 ms (round trip 5-6 ms); `beevm vms` idle with 3 calls; reaped after 3 s; prewarm 2 VMs in 344 ms; Ctrl-C exit 0, nothing left.
+- **Benchmark** (`bench coldstart --runs 100 --mode restore,warm`, WSL2):
+
+  | ms | p50 | p90 | p99 | max |
+  |---|---|---|---|---|
+  | restore: vm ready | 44.2 | 52.2 | 60.8 | 61.4 |
+  | restore: first response (incl. upload + call) | 88.4 | 101.2 | 113.6 | 156.3 |
+  | **warm: first response** | **1.6** | 2.7 | **5.0** | 10.0 |
+
+  The warm path is ~55x faster than a restore. Pool bookkeeping is microseconds; the rest is the vsock round trip and starting the function's process in the guest.
+- **Learned / noted:**
+  - The first call on a **prewarmed** VM took 16 ms, not ~1 ms: its code was uploaded but never run, so the guest pages for running it are still faulted in lazily (as in M6). Refine idea: a throw-away call during prewarm (needs a "warm-up payload" contract) or page prefetch on the cloud node.
+  - `/tmp` persists between warm calls of the same function (as in AWS Lambda); never across functions.
+  - Idle VMs are not paused (their vCPU is halted anyway); pausing to save CPU is a refine idea, measure first.
+- **Refine later:** `go test -race` under KVM load, eviction policy (LRU across tenants could let one tenant push out another's VMs: per-tenant limits belong with M9), prewarm warm-up call, idle VM memory for M12 density.
+- **Next:** milestone 9 (isolation and networking) per the must-do order, or milestone 8 (Python/Node runtimes).

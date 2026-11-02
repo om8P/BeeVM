@@ -153,6 +153,25 @@ func (c *Client) Delete(ctx context.Context, name string) error {
 	return nil
 }
 
+// Prewarm asks the server to start up to n idle VMs for a function.
+func (c *Client) Prewarm(ctx context.Context, name string, n int) (apitypes.PrewarmResult, error) {
+	resp, err := c.do(ctx, http.MethodPost, fnPath(name)+"/prewarm?count="+strconv.Itoa(n), nil, "")
+	if err != nil {
+		return apitypes.PrewarmResult{}, err
+	}
+	return decodeBody[apitypes.PrewarmResult](resp)
+}
+
+// VMs lists the caller's VMs in the warm pool.
+func (c *Client) VMs(ctx context.Context) ([]apitypes.VM, error) {
+	resp, err := c.do(ctx, http.MethodGet, "/api/v1/vms", nil, "")
+	if err != nil {
+		return nil, err
+	}
+	l, err := decodeBody[apitypes.VMList](resp)
+	return l.VMs, err
+}
+
 // InvokeResult is a successful call.
 type InvokeResult struct {
 	Output     json.RawMessage
@@ -162,7 +181,7 @@ type InvokeResult struct {
 	TotalMS    int64  // inside the server; the caller measures its own round trip
 	CodeCache  string // "hit" or "miss"; empty if the server did not say
 	FetchMS    int64  // time the server spent fetching the code from the artifact store
-	StartKind  string // "restore" or "boot"
+	StartKind  string // "warm", "restore" or "boot"
 	UploadMS   int64  // time spent sending the code into the VM
 }
 

@@ -44,6 +44,24 @@ func TestBenchTableShowsRestoreOnlyColumnsForRestore(t *testing.T) {
 	}
 }
 
+func TestBenchTableWarmShowsOnlyFirstResponse(t *testing.T) {
+	rows := tableRows(benchTable([]benchRun{
+		{Mode: "restore", Load: 20, Agent: 10, Ready: 31, Upload: 20, Invoke: 15, First: 70},
+		{Mode: "warm", First: 4},
+	}))
+	if !rows["warm/first response"] {
+		t.Errorf("warm first response missing: %v", rows)
+	}
+	for _, r := range []string{"warm/vm ready", "warm/upload", "warm/invoke", "warm/load"} {
+		if rows[r] {
+			t.Errorf("row %s should not exist for warm", r)
+		}
+	}
+	if !rows["restore/upload"] || !rows["restore/vm ready"] {
+		t.Errorf("restore rows missing: %v", rows)
+	}
+}
+
 func tableRows(out string) map[string]bool {
 	rows := map[string]bool{}
 	for _, line := range strings.Split(out, "\n") {

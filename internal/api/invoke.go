@@ -86,6 +86,7 @@ func (s *Server) invoke(w http.ResponseWriter, r *http.Request) {
 	res, err := s.Runner.Run(r.Context(), runner.Request{
 		CodePath: codePath, Payload: payload,
 		MemoryMiB: f.MemoryMiB, VCPUs: f.VCPUs, TimeoutMS: f.TimeoutMS,
+		TenantID: tenant.ID, FunctionID: f.ID, CodeSHA256: f.CodeSHA256,
 	})
 	info.vmID = res.VMID
 	info.start = res.StartKind

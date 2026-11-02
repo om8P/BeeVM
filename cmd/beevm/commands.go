@@ -141,8 +141,13 @@ func newInvoke(s *settings) *cobra.Command {
 				if start == "" {
 					start = "boot" // older servers do not send it
 				}
-				fmt.Fprintf(os.Stderr, "vm %s: %s %d ms, upload %d ms, function %d ms, server total %d ms, round trip %d ms\n",
-					res.VMID, start, res.BootMS, res.UploadMS, res.FunctionMS, res.TotalMS, rtt.Milliseconds())
+				if start == "warm" { // reused VM: nothing was started or uploaded
+					fmt.Fprintf(os.Stderr, "vm %s: warm, function %d ms, server total %d ms, round trip %d ms\n",
+						res.VMID, res.FunctionMS, res.TotalMS, rtt.Milliseconds())
+				} else {
+					fmt.Fprintf(os.Stderr, "vm %s: %s %d ms, upload %d ms, function %d ms, server total %d ms, round trip %d ms\n",
+						res.VMID, start, res.BootMS, res.UploadMS, res.FunctionMS, res.TotalMS, rtt.Milliseconds())
+				}
 				if res.CodeCache != "" {
 					fmt.Fprintf(os.Stderr, "code cache: %s, fetch %d ms\n", res.CodeCache, res.FetchMS)
 				}
@@ -197,6 +202,67 @@ func newLs(s *settings) *cobra.Command {
 			for _, f := range fns {
 				fmt.Fprintf(tw, "%s\t%s\t%d MiB\t%d\t%s\t%s\n", f.Name, humanSize(f.CodeSize), f.MemoryMiB, f.VCPUs,
 					time.Duration(f.TimeoutMS)*time.Millisecond, f.UpdatedAt.Local().Format(time.DateTime))
+			}
+			return tw.Flush()
+		},
+	}
+}
+
+// ---------------------------------------------------------------- warm pool
+
+func newPrewarm(s *settings) *cobra.Command {
+	var n int
+	cmd := &cobra.Command{
+		Use:   "prewarm <name>",
+		Short: "Start idle VMs for a function so its next calls are warm",
+		Long: "Starts up to N VMs with the function's code loaded. They wait for calls and are removed\n" +
+			"after the server's keep-alive time like any idle VM.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := s.client()
+			if err != nil {
+				return err
+			}
+			start := time.Now()
+			res, err := c.Prewarm(cmd.Context(), args[0], n)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("started %d of %d VMs for %s in %d ms\n", res.Started, res.Requested, args[0], time.Since(start).Milliseconds())
+			return nil
+		},
+	}
+	cmd.Flags().IntVarP(&n, "count", "n", 1, "how many VMs")
+	return cmd
+}
+
+func newVMs(s *settings) *cobra.Command {
+	return &cobra.Command{
+		Use:   "vms",
+		Short: "List your VMs in the warm pool",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := s.client()
+			if err != nil {
+				return err
+			}
+			vms, err := c.VMs(cmd.Context())
+			if err != nil {
+				return err
+			}
+			if len(vms) == 0 {
+				fmt.Println("no VMs running")
+				return nil
+			}
+			tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+			fmt.Fprintln(tw, "VM\tFUNCTION\tSTATE\tFOR\tCALLS")
+			for _, v := range vms {
+				fn := v.Function
+				if fn == "" {
+					fn = "(removed)"
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\n", v.ID, fn, v.State,
+					time.Since(v.Since).Round(100*time.Millisecond), v.Calls)
 			}
 			return tw.Flush()
 		},
