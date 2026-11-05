@@ -14,6 +14,17 @@ export ALPINE_SHA256="f8e1cafba9b1b283b5d30d06f9885c8d2bc161ffe9083ade8e2e157813
 export KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-6.1.155"
 export KERNEL_SHA256="e20e46d0c36c55c0d1014eb20576171b3f3d922260d9f792017aeff53af3d4f2"
 
+# Runtime images (M8, checked 2026-11-05). apk.static is Alpine's package manager as one
+# static binary; it verifies every package with the keys from the minirootfs above.
+# Alpine keeps only the newest build per branch, so package versions are pinned by major
+# version (`~`), and the installed versions are written to /etc/beevm/versions in the image.
+# Python 3.14 + Node.js 24 are what Alpine 3.24 ships (3.12/20 are not available; Node 20 is
+# end-of-life since 2026-04). Decided with the user on 2026-11-05.
+export APK_STATIC_VERSION="3.0.9-r0"
+export APK_STATIC_SHA256="0a1a0682375f66a83b7b903f6e4638ccfe312547d50d336b5f2be9fc391281be"
+export PYTHON_PKGS="python3~3.14 python3-pycache-pyc0~3.14"
+export NODE_PKGS="nodejs~24"
+
 export IMAGES_DIR="$BEEVM_HOME/images"
 export BIN_DIR="$BEEVM_HOME/bin"
 export CACHE_DIR="$BEEVM_HOME/cache"

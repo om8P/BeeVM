@@ -90,6 +90,8 @@ var migrations = []string{
 		updated_at  INTEGER NOT NULL,
 		UNIQUE (tenant_id, name)
 	);`,
+	// 2: Python and Node.js functions name the function to call inside their package.
+	`ALTER TABLE functions ADD COLUMN handler TEXT NOT NULL DEFAULT '';`,
 }
 
 func migrate(db *sql.DB) error {

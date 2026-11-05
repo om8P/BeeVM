@@ -128,3 +128,22 @@ func TestProcessFaultsOfThisProcess(t *testing.T) {
 		t.Error("want -1 for a missing process")
 	}
 }
+
+func TestBenchTableFunctionMode(t *testing.T) {
+	rows := tableRows(benchTable([]benchRun{
+		{Mode: "restore", Load: 20, Agent: 10, Ready: 31, Upload: 20, Import: 25, Invoke: 15, First: 95},
+		{Mode: "function", Load: 20, Agent: 10, Ready: 31, Invoke: 3, First: 35},
+		{Mode: "boot", Ready: 900, Upload: 20, First: 950},
+	}))
+	for _, r := range []string{"function/load", "function/vm ready", "function/invoke", "function/first response", "restore/import"} {
+		if !rows[r] {
+			t.Errorf("row %s missing: %v", r, rows)
+		}
+	}
+	// The code is already inside a function snapshot; a binary has nothing to import.
+	for _, r := range []string{"function/upload", "function/import", "boot/import"} {
+		if rows[r] {
+			t.Errorf("row %s should not exist", r)
+		}
+	}
+}

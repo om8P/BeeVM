@@ -10,12 +10,9 @@ package agent
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -37,15 +34,24 @@ type Server struct {
 	setClock   func(time.Time) error
 	addEntropy func([]byte) error
 
+	// Python/Node.js: where packages are unpacked, how to start each runtime's shim (replaced
+	// in unit tests), the running shim and the handler it has imported ("" = none).
+	codeDir  string
+	shimCmds map[string][]string
+	shim     *shim
+	loaded   string
+
 	// mu makes uploads and invocations run one at a time: a FaaS VM serves one request
 	// at a time, and an upload must not replace the binary while it is running.
 	mu sync.Mutex
 }
 
-// New creates a Server that stores the function at funcPath.
+// New creates a Server that stores a binary function at funcPath and unpacks packages into
+// the "code" folder next to it (agentproto.CodeDir in the guest).
 func New(funcPath, version string) *Server {
 	return &Server{funcPath: funcPath, version: version, started: time.Now(),
-		setClock: setSystemClock, addEntropy: addKernelEntropy}
+		setClock: setSystemClock, addEntropy: addKernelEntropy,
+		codeDir: filepath.Join(filepath.Dir(funcPath), "code"), shimCmds: defaultShims}
 }
 
 // Handler returns the HTTP handler for the agent's endpoints.
@@ -55,6 +61,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT "+agentproto.PathFunction, s.handleUpload)
 	mux.HandleFunc("POST "+agentproto.PathInvoke, s.handleInvoke)
 	mux.HandleFunc("POST "+agentproto.PathResume, s.handleResume)
+	mux.HandleFunc("PUT "+agentproto.PathPackage, s.handlePackage)
+	mux.HandleFunc("POST "+agentproto.PathLoad, s.handleLoad)
 	return mux
 }
 
@@ -81,46 +89,21 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	dir := filepath.Dir(s.funcPath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		writeError(w, http.StatusInternalServerError, "create %s: %v", dir, err)
-		return
-	}
 	// Write to a temp file and rename, so a half-uploaded binary is never executable.
-	tmp, err := os.CreateTemp(dir, "upload-*")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "create temp file: %v", err)
+	tmp, sum, n, ok := s.receive(w, r, "function")
+	if !ok {
 		return
 	}
-	defer os.Remove(tmp.Name()) // no-op after a successful rename
-
-	hash := sha256.New()
-	n, err := io.Copy(io.MultiWriter(tmp, hash), r.Body)
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
-			writeError(w, http.StatusRequestEntityTooLarge, "function larger than %d bytes", agentproto.MaxUploadBytes)
-		} else {
-			writeError(w, http.StatusBadRequest, "read upload: %v", err)
-		}
-		return
-	}
-	if n == 0 {
-		writeError(w, http.StatusBadRequest, "empty upload")
-		return
-	}
-	if err := os.Chmod(tmp.Name(), 0o755); err != nil {
+	defer os.Remove(tmp) // no-op after a successful rename
+	if err := os.Chmod(tmp, 0o755); err != nil {
 		writeError(w, http.StatusInternalServerError, "chmod: %v", err)
 		return
 	}
-	if err := os.Rename(tmp.Name(), s.funcPath); err != nil {
+	if err := os.Rename(tmp, s.funcPath); err != nil {
 		writeError(w, http.StatusInternalServerError, "install function: %v", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, agentproto.UploadResponse{SHA256: hex.EncodeToString(hash.Sum(nil)), Size: n})
+	writeJSON(w, http.StatusOK, agentproto.UploadResponse{SHA256: sum, Size: n})
 }
 
 func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
@@ -153,6 +136,14 @@ func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.shim != nil { // a Python/Node.js runtime is running: the call goes to its handler
+		if s.loaded == "" {
+			writeError(w, http.StatusConflict, "no handler loaded yet")
+			return
+		}
+		writeJSON(w, http.StatusOK, s.invokeShim(req.Payload, timeout))
+		return
+	}
 	if _, err := os.Stat(s.funcPath); err != nil {
 		writeError(w, http.StatusConflict, "no function uploaded yet")
 		return

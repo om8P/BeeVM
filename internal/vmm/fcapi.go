@@ -53,11 +53,20 @@ func (a *fcAPI) waitReady(ctx context.Context, every time.Duration, exited <-cha
 // put sends a PUT request with a JSON body. Firecracker answers 204 on success, or an error
 // status with {"fault_message": "..."}.
 func (a *fcAPI) put(ctx context.Context, path string, body any) error {
+	return a.send(ctx, http.MethodPut, path, body)
+}
+
+// patch sends a PATCH request with a JSON body (for example pausing the VM).
+func (a *fcAPI) patch(ctx context.Context, path string, body any) error {
+	return a.send(ctx, http.MethodPatch, path, body)
+}
+
+func (a *fcAPI) send(ctx context.Context, method, path string, body any) error {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, "http://localhost"+path, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, method, "http://localhost"+path, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}

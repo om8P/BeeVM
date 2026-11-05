@@ -17,7 +17,8 @@ It grows with the project: each finished milestone adds a section. The reasons b
 | Part 7: Milestone 5, artifact store with MinIO / S3 | Done |
 | Part 8: Milestone 6, snapshots and fast restore | Done, refined (8.10); userfaultfd spike deferred (8.11) |
 | Part 9: Milestone 7, the warm pool | Done |
-| Part 10: the repository, GitHub and renames | Done |
+| Part 10: Milestone 8, Python and Node.js runtimes, function snapshots | Done |
+| Part 11: the repository, GitHub and renames | Done |
 | Appendices: cheat sheet, versions, numbers, troubleshooting, regenerating these documents | — |
 
 ---
@@ -45,7 +46,8 @@ Every step in order. Each one is explained in the parts below.
 | 15 | WSL, optional | Milestone 5: stop the server, run `make minio` in one terminal, then in another `set -a; . deploy/minio.env; set +a` and `./bin/beevmd serve`; deploy and invoke again | 7.3, 7.4 |
 | 16 | WSL | Milestone 6: `make images build`, then `./bin/beevmd invoke --restore --code bin/functions/hello-go-binary` and `./bin/beevmd bench coldstart --runs 100` (boot vs restore) | 8.6, 8.7 |
 | 17 | WSL | Milestone 7: with `./bin/beevmd serve` running, call `./bin/beevm invoke hello -v` twice (the second says `warm`), then `./bin/beevm vms`; `./bin/beevmd bench coldstart --mode restore,warm` | 9.7, 9.8 |
-| 18 | WSL | `make test && make test-kvm` (all tests; `make test-s3` too if MinIO is running) | 4.4, 5.7, 6.5, 7.5, 8.8, 9.9 |
+| 18 | WSL | Milestone 8: `make images build`, then with `serve` running `./bin/beevm deploy hello-py examples/functions/hello-python` and `./bin/beevm invoke hello-py -v` (says `function snapshot`); `./bin/beevmd bench coldstart --code examples/functions/hello-node --mode restore,function,warm` | 10.5, 10.6 |
+| 19 | WSL | `make test && make test-kvm` (all tests; `make test-s3` too if MinIO is running) | 4.4, 5.7, 6.5, 7.5, 8.8, 9.9, 10.7 |
 
 ---
 
@@ -127,7 +129,7 @@ Tell Git who you are (it is written into every commit, and is public on GitHub):
 
 ```bash
 git config --global user.name "Your Name"
-git config --global user.email "you@example.com"     # or GitHub's no-reply address, see Part 10.4
+git config --global user.email "you@example.com"     # or GitHub's no-reply address, see Part 11.4
 ```
 
 Everything else (Go, Firecracker, kernel, image) is installed by `make setup` in Part 3.
@@ -329,7 +331,7 @@ Already done in the repo; for a fresh clone you only need:
 make build         # downloads Go dependencies the first time, builds bin/beevmd
 ```
 
-For the record, the module was created with the commands below (it was first named after the old GitHub account; see Part 10.3 for the renames):
+For the record, the module was created with the commands below (it was first named after the old GitHub account; see Part 11.3 for the renames):
 
 ```bash
 go mod init github.com/om8P/BeeVM
@@ -1442,11 +1444,166 @@ The KVM tests prove on real VMs: repeat calls reuse the VM (restore 105 ms, warm
 
 ---
 
-## Part 10: the repository, GitHub and renames
+## Part 10: Milestone 8, Python and Node.js runtimes, function snapshots
+
+**Goal:** run functions written in Python and Node.js, not only static binaries, and make their cold start fast with **function snapshots**: a snapshot taken after the function's code was uploaded and imported, so a restored VM can answer the first call straight away.
+
+### 10.1 Versions: Python 3.14 and Node.js 24
+
+The plan said Python 3.12 and Node.js 20. Alpine 3.24 (our guest base) ships **Python 3.14 and Node.js 24**, and Node 20 has been end-of-life since April 2026. Taking 3.12/20 would have meant mixing in an unsupported Alpine branch, so we agreed (2026-11-05) to use what 3.24 ships. The images record the exact installed versions in `/etc/beevm/versions`.
+
+### 10.2 Three images, built without root
+
+`make images` now builds three root filesystems:
+
+| Image | Size (on disk) | Contents |
+|---|---|---|
+| `rootfs.ext4` | 20 MB | Alpine minirootfs + agent (binaries, as before) |
+| `rootfs-python.ext4` | 75 MB | + `python3`, precompiled standard library (`python3-pycache-pyc0`), `/usr/lib/beevm/shim.py` |
+| `rootfs-node.ext4` | 98 MB | + `nodejs`, `/usr/lib/beevm/shim.js` |
+
+How packages get in without Docker or sudo: `apk.static` is Alpine's package manager as one static program. `apk --root <folder> add python3` installs into that folder instead of the running system, and checks every package's signature with the keys from the (checksum-verified) minirootfs. It runs inside the same `fakeroot` session as before. One catch: fakeroot works by injecting a library into programs, and a **static** program ignores it, so the files apk writes belong to us. A `chown -R 0:0` afterwards (inside fakeroot) fixes that, and `mkfs.ext4 -d` records root as the owner.
+
+Alpine keeps only the newest build of each package in a branch, so packages are pinned by major version (`python3~3.14`, `nodejs~24`, in `scripts/common.sh`). Only `apk-tools-static` has an exact version and checksum; when Alpine replaces it, its download returns 404 and the script says what to update.
+
+```bash
+make images                 # all three (or: make rootfs-python / make rootfs-node)
+debugfs -R 'cat /etc/beevm/versions' ~/.beevm/images/rootfs-python.ext4 | grep python3
+```
+
+### 10.3 How a Python or Node.js function runs
+
+A binary is started once **per call**. An interpreter takes tens of milliseconds just to start and import code, so Python and Node functions run inside a long-lived **shim** process instead:
+
+```mermaid
+sequenceDiagram
+    participant H as host (runner)
+    participant A as agent (in the VM)
+    participant S as shim (python3 / node)
+    H->>A: PUT /package (zip)
+    A->>A: check + unpack to /run/beevm/code
+    H->>A: POST /load {runtime, handler}
+    A->>S: start (once), {"op":"load"} on fd 3
+    S-->>A: {"ok":true} on fd 4 (module imported)
+    H->>A: POST /invoke {payload}
+    A->>S: {"op":"invoke","payload":...}
+    S-->>A: {"ok":true,"output":...,"logs":"..."}
+    A-->>H: InvokeResponse (same as for binaries)
+```
+
+- **Two extra pipes.** The agent gives the shim two pipes that it sees as file descriptors 3 (requests) and 4 (answers): Go's `cmd.ExtraFiles`. Its stdout and stderr stay free, so a user's `print()` or `console.log()` can never break the protocol; the shim captures them per call and returns them as the log.
+- **The contract.** Python: `handler.py` with `def handler(event)` (or `handler(event, context)`, like AWS Lambda). Node: `index.js` exporting `handler`, which may be `async`. `--handler` picks another, e.g. `app.main`.
+- **Errors.** An exception becomes HTTP 502 with the traceback or stack as the log, and the VM stays usable. A timeout kills the shim and the VM is thrown away; so is a VM whose runtime exited (`os._exit`, a crash). Code that does not import gives 502 "function failed to load".
+- **Packages are zip files.** `beevm deploy` zips a folder or a single `.py`/`.js` file for you. The rules (in `internal/pkg`, checked by the API **and** again by the agent) stop **zip slip**: an entry named `../../sbin/beevm-agent` or `/etc/passwd` would otherwise be written outside the code folder. Also: no symlinks, at most 2,000 files and 32 MiB unpacked (the code lives in the VM's RAM), counted on the real bytes because a zip can lie about its sizes.
+
+### 10.4 Two tiers of snapshots
+
+| Tier | Built when | What is inside | A restored VM still has to... |
+|---|---|---|---|
+| **Runtime snapshot** (one per runtime and VM size) | server start, or first need | booted guest, agent, interpreter started (python/node) | upload the code and import it |
+| **Function snapshot** (one per function) | in the background after a deploy, or after a call that had to import | the above + this function's code, imported | nothing: call it |
+
+A function snapshot is made by restoring the runtime snapshot, uploading and importing the code, waiting 200 ms, and snapshotting **the restored VM again**. Its key contains its parent's key, so when an image changes, the runtime snapshot **and** every function snapshot on top of it become stale together. The tenant and function ID are in the key too: like warm VMs, snapshots are never shared between functions, even with identical code.
+
+Why this helps: importing is real work (Python's `import json` alone took ~22 ms in the spike), and the first run of anything touches memory pages that a restored VM must fault in one by one (8.10). In a function snapshot that work was done once, before freezing.
+
+For every new VM a runner picks: the function snapshot if it is built, else the runtime snapshot (then upload and import, and start building the function snapshot), else a boot. At most one function snapshot is built at a time, a failed build is not retried for a minute, and shutdown waits for running builds so no VM is left behind. Redeploy and delete remove the function's snapshots; `serve` also removes snapshots of functions that no longer exist when it starts.
+
+A trap that had to be fixed: until now, `serve` deleted every snapshot that did not match the **binary** image at start-up ("stale"), which would have wiped every Python and Node snapshot. `List` now compares each snapshot with its own runtime's inputs. The binary snapshot key is unchanged (the new `Runtime` field is left out of the hash when empty; a test pins the old key).
+
+One more bug found by the KVM tests: `VM.Pause` and `VM.CreateSnapshot` only worked for booted VMs (they used the SDK). A restored VM is driven by our own small API client, which now also sends `PATCH /vm` (pause) and `PUT /snapshot/create`.
+
+### 10.5 Use it
+
+```bash
+make images build
+./bin/beevmd invoke --code examples/functions/hello-python --payload '{"name":"Om"}'            # boot
+./bin/beevmd invoke --restore --code examples/functions/hello-node --payload '{"name":"Om"}'   # runtime snapshot
+./bin/beevmd serve        # builds the binary, python and node runtime snapshots in the background
+```
+
+In a second terminal:
+
+```bash
+./bin/beevm deploy hello-py examples/functions/hello-python     # runtime detected from handler.py
+./bin/beevm deploy hello-js examples/functions/hello-node       # from index.js
+./bin/beevm deploy app ./app.py --handler app.main              # one file, another function
+./bin/beevmd snapshot ls                                        # KIND runtime / function
+./bin/beevm invoke hello-py --payload '{"name":"Om"}' -v        # restore (function snapshot) ..., upload 0 ms, load 0 ms
+./bin/beevm invoke hello-py --payload '{"name":"Om"}' -v        # warm
+```
+
+Hand check (WSL2): each deploy built its function snapshot in 440 to 550 ms; the first call came from it (server total 74 ms Python, 89 ms Node, 98 ms binary), the second was warm (1 to 2 ms); deleting a function removed its snapshot; Ctrl-C left nothing behind.
+
+### 10.6 Measure it
+
+```bash
+./bin/beevmd bench coldstart --runs 50 --mode boot,restore,function,warm --code bin/functions/hello-go-binary
+./bin/beevmd bench coldstart --runs 50 --mode boot,restore,function,warm --code examples/functions/hello-python
+./bin/beevmd bench coldstart --runs 50 --mode boot,restore,function,warm --code examples/functions/hello-node
+```
+
+Modes: **boot** (new VM, upload, import, call), **restore** (runtime snapshot, upload, import, call), **function** (function snapshot, call), **warm** (repeat call on a pooled VM). Results, first response in ms (WSL2, Performance mode, 128 MiB, 1 vCPU, 50 runs per mode, so p99 is the second slowest run; raw data in `bench/results/m8/`, git-ignored):
+
+| first response, p50 / p99 (ms) | binary | Python | Node.js |
+|---|---|---|---|
+| boot | 945 / 1065 | 1023 / 1052 | 1077 / 1157 |
+| restore: runtime snapshot + upload + import | 87.5 / 124.8 | 86.7 / 104.5 | 149.7 / 173.0 |
+| **function snapshot** | **73.3 / 90.0** | **58.4 / 74.0** | **85.1 / 124.7** |
+| warm | 1.5 / 5.6 | 0.4 / 1.2 | 0.7 / 19.8 |
+
+Where the time goes (p50, ms):
+
+| | VM ready | upload | import | call |
+|---|---|---|---|---|
+| binary, runtime snapshot | 45.0 | 26.5 (2.5 MB binary) | - | 14.1 |
+| binary, function snapshot | 48.6 | - | - | 23.1 |
+| Python, runtime snapshot | 43.6 | 10.1 | 31.1 | 2.2 |
+| Python, function snapshot | 46.0 | - | - | 13.0 |
+| Node, runtime snapshot | 45.2 | 9.5 | 89.3 | 5.2 |
+| Node, function snapshot | 45.7 | - | - | 39.8 |
+
+What this shows:
+
+- **VM ready is the same for every runtime and tier** (44 to 49 ms p50): restoring does not depend on what is inside the snapshot, because memory is mapped, not read.
+- A function snapshot saves the upload and the import: Python **87 -> 58 ms** (-33 %), Node **150 -> 85 ms** (-43 %), binary 88 -> 73 ms (-16 %).
+- The first call after a function-snapshot restore is slower than on a warm VM (Python 13 ms, Node 40 ms, binary 23 ms): code that ran before the snapshot still lives in memory pages the restored VM must fault in one by one (8.10). For the binary the call even got slower than after an upload (23 vs 14 ms): the uploaded binary now sits in snapshot memory instead of freshly written RAM. Page prefetch on the cloud node (8.11) targets exactly this.
+- Without snapshots an interpreter costs real time: importing takes 64 ms (Python) and 131 ms (Node) after a boot, 31 and 89 ms after a runtime-snapshot restore (interpreter already started).
+- Warm Python and Node calls (0.4 to 0.7 ms) are faster than warm binary calls (1.5 ms): the shim is already running, while a binary is started as a new process for every call.
+- Python from a function snapshot is the fastest cold start BeeVM has so far: 58 ms p50, 74 ms p99.
+
+### 10.7 Tests
+
+```bash
+make test        # new: pkg (zip rules, zip slip, zip bomb, detect), agent shims (run with the
+                 # host's python3; node tests skip without node), registry migration, API runtimes,
+                 # snapshot tiers and the stale fix, runner (function hit, background builds), CLI
+make test-kvm    # new: real function snapshot build + restore; end to end: hello-python and
+                 # hello-node from the function snapshot, the runtime snapshot path, syntax error,
+                 # raise (VM kept), timeout and runtime exit (VM replaced), async Node, per-function
+                 # snapshots removed on delete and redeploy
+```
+
+All M1 to M7 tests still pass (265 tests with `-tags kvm`).
+
+### 10.8 Decisions and things to know
+
+| Topic | What we found or decided |
+|---|---|
+| Disk use | A function snapshot's memory file is the VM's memory size (128 MiB) per function. Fine for a demo; a refine could use Firecracker's diff snapshots or delete snapshots of rarely called functions. Note it for M12 (density) |
+| Snapshot builds do not count against `--max-vms` | They are short (~0.5 s) and one at a time. Count them if density tests show it matters |
+| Python runs as `python3 -I -B -u` | isolated mode (ignores `PYTHON*` variables), no `.pyc` files, unbuffered output |
+| One handler per interpreter | Loading another handler (or a new package) restarts the shim, so old and new modules never mix |
+| Node's first call after a restore is slower than Python's | V8 compiles lazily and touches more memory on its first run; the page-fault cost of nested virtualization (8.10) adds up. A warm-up call before snapshotting would need a "warm-up payload" contract (same idea as the M7 prewarm note) |
+| The shim protocol is JSON lines | Simple to debug; a 6 MB output is one line. Answers longer than the limit are read to the end and dropped, so the stream stays in sync |
+
+---
+
+## Part 11: the repository, GitHub and renames
 
 What we did, so you can do the same for your own fork or a new repository.
 
-### 10.1 Create and publish the repository
+### 11.1 Create and publish the repository
 
 ```bash
 gh auth login                                   # once: log the GitHub CLI in
@@ -1455,7 +1612,7 @@ gh repo create <user>/beevm --public --source=. --remote=origin --push
 
 `gh repo create ... --source=. --push` creates the repository on GitHub, adds it as `origin` and pushes the current branch. We chose **public** so the group and graders can see it.
 
-### 10.2 Removing a file from history before going public
+### 11.2 Removing a file from history before going public
 
 The first commit contained the course case-study `.docx`. Deleting it in a new commit would still leave it in the history, visible to anyone. So, before the first push, we rewrote the local history:
 
@@ -1487,7 +1644,7 @@ flowchart LR
 - Git's own documentation now recommends `git filter-repo` for this job; `filter-branch` was enough for four local commits.
 - When you are sure you do not need it: `git branch -D backup-before-rewrite`.
 
-### 10.3 Renames: repository, module path, GitHub username
+### 11.3 Renames: repository, module path, GitHub username
 
 The Go module path is both the name in every `import` line and the address other people download the code from, so it should always match the repository.
 
@@ -1499,12 +1656,12 @@ The Go module path is both the name in every `import` line and the address other
 
 To find every old reference before a rename: `grep -rIl "old-name" --exclude-dir=.git --exclude-dir=node_modules .`
 
-### 10.4 Things to know about commits
+### 11.4 Things to know about commits
 
 - Commit author name and email come from `git config` and are **public** on GitHub. To hide your email, use GitHub's no-reply address: `git config --global user.email "<id>+<username>@users.noreply.github.com"`. Old commits keep the old values.
 - Every milestone ends with: tests pass, `docs/progress.md` updated, one commit.
 
-### 10.5 The documentation folders
+### 11.5 The documentation folders
 
 | Folder | For whom | In Git |
 |---|---|---|
@@ -1512,7 +1669,7 @@ To find every old reference before a rename: `grep -rIl "old-name" --exclude-dir
 | `developer-guide/` | people: this guide (`guide.md`, plus a Word copy) and the learning notes (`learning-notes.docx`) | yes, the documents only |
 | `developer-guide/tools/` | the scripts that generate the Word files | no (local only, see Appendix E) |
 
-### 10.6 Commit history on GitHub
+### 11.6 Commit history on GitHub
 
 | Commit | What |
 |---|---|
@@ -1548,22 +1705,22 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 | `make help` | list targets |
 | `make setup` | one-time install (sudo); safe to re-run |
 | `wsl --shutdown` (PowerShell) | restart WSL so the `kvm` group takes effect |
-| `make images` / `make kernel` / `make rootfs` | (re)build guest images; `rootfs` also rebuilds the guest agent |
+| `make images` / `make kernel` / `make rootfs` / `make rootfs-python` / `make rootfs-node` | (re)build guest images (binary, python, node); each rootfs also rebuilds the guest agent |
 | `make boot-test` | milestone 1 automatic boot check |
 | `make boot` | milestone 1 interactive VM (`reboot -f` to exit) |
 | `make build` | build `bin/beevmd` (server) and `bin/beevm` (user CLI) |
 | `make examples` | build example functions into `bin/functions/` |
 | `./bin/beevmd boot [--hold D] [--keep-logs] [--mem N] [--vcpus N]` | milestone 2: boot, show console, stop |
 | `./bin/beevmd invoke --code F [--payload J] [--repeat N] [--timeout D] [--console] [--keep-logs] [--restore]` | milestone 3: run a function in a VM (`--restore`: from the base snapshot, milestone 6) |
-| `./bin/beevmd snapshot build [--mem N --vcpus N]` / `ls` / `rm <key>` / `rm --stale` | milestone 6: manage base snapshots |
-| `./bin/beevmd bench coldstart [--runs N] [--mode boot,restore,warm]` | milestone 6/7: p50/p90/p99 of boot vs restore vs warm calls, saved to `bench/results/` |
+| `./bin/beevmd snapshot build [--runtime binary\|python\|node] [--mem N --vcpus N]` / `ls` / `rm <key>` / `rm --stale` | milestone 6/8: manage runtime and function snapshots |
+| `./bin/beevmd bench coldstart [--runs N] [--mode boot,restore,function,warm] [--code F] [--runtime R]` | milestone 6-8: p50/p90/p99 of boot vs restore vs function snapshot vs warm calls, saved to `bench/results/` |
 | `./bin/beevmd bench coldstart … [--probe resume\|health] [--fc-metrics] [--cold-cache] [--settle D] [--gap D] [--pin CPUS] [--mem N] [--out DIR]` | M6 refine: tuning experiments (see 8.10.3) |
 | `powercfg /getactivescheme` (PowerShell) | check the power mode before benchmarking (Performance mode, plugged in) |
 | `firecracker --api-sock S --level Trace --show-level --show-log-origin` | Firecracker with detailed, timestamped logs (how the load time was traced) |
 | `./bin/beevmd tenant add <name>` / `tenant ls` | milestone 4: create a tenant (prints its API key once) |
 | `./bin/beevmd key add <tenant>` / `key ls` / `key revoke <prefix>` | milestone 4: manage API keys |
 | `./bin/beevmd serve [--addr A] [--max-vms N] [--queue-wait D] [--s3-*] [--runner warm\|snapshot\|cold] [--keep-alive D]` | milestone 4-7: run the HTTP service (warm pool by default: VMs kept `--keep-alive`, default 60 s, new ones restored from snapshots) |
-| `./bin/beevm deploy <name> <binary> [--memory M] [--vcpus N] [--timeout D]` | upload a function (needs `BEEVM_API_KEY`) |
+| `./bin/beevm deploy <name> <binary\|folder\|file.py\|file.js\|pkg.zip> [--runtime R] [--handler H] [--memory M] [--vcpus N] [--timeout D]` | upload a function (needs `BEEVM_API_KEY`); runtime detected from the path |
 | `./bin/beevm invoke <name> [--payload J \| --payload-file F] [-v]` | call a function; `-v` prints timings and code cache hit/miss |
 | `./bin/beevm ls` / `rm <name>` | list or delete your functions |
 | `./bin/beevm prewarm <name> [-n N]` | milestone 7: start N idle VMs so the next calls are warm |
@@ -1583,6 +1740,9 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 | Go | 1.27.3 (module needs ≥ 1.24) | `scripts/common.sh`, `go.mod` |
 | Guest kernel | vmlinux 6.1.155 (Firecracker CI, v1.15 folder) | `scripts/common.sh` |
 | Alpine minirootfs | 3.24.3 | `scripts/common.sh` |
+| apk-tools-static | 3.0.9-r0 (exact, with checksum) | `scripts/common.sh` |
+| Python (guest) | 3.14.x (`python3~3.14`; 3.14.10-r1 on 2026-11-05) | `scripts/common.sh` |
+| Node.js (guest) | 24.x (`nodejs~24`; 24.22.1-r1 on 2026-11-05) | `scripts/common.sh` |
 | firecracker-go-sdk | main @ `6fb280e993d4` (Dec 2025) | `go.mod` |
 | mdlayher/vsock | v1.3.0 | `go.mod` |
 | go-chi/chi | v5.5.0 | `go.mod` |
@@ -1633,6 +1793,14 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 | Warm call over HTTP with the CLI, round trip | 5 to 6 ms | 7 |
 | First call on a prewarmed VM (code uploaded, never run) | ~16 ms | 7 |
 | Prewarming 2 VMs in parallel | ~344 ms | 7 |
+| Python / Node.js image on disk | 75 / 98 MB | 8 |
+| Building a runtime snapshot (Python / Node, incl. 1 s settle) | 2.2-2.4 / 2.3-2.5 s | 8 |
+| Building a function snapshot (from the runtime snapshot) | 0.44-0.64 s | 8 |
+| Import after a boot / after a runtime-snapshot restore (Python, p50) | 64 / 31 ms | 8 |
+| Import after a boot / after a runtime-snapshot restore (Node, p50) | 131 / 89 ms | 8 |
+| **Cold start from a function snapshot, first response (p50 / p99 of 50)** | **binary 73 / 90, Python 58 / 74, Node 85 / 125 ms** | 8 |
+| Cold start from the runtime snapshot + upload + import (p50 / p99 of 50) | binary 88 / 125, Python 87 / 105, Node 150 / 173 ms | 8 |
+| Warm call inside the server (p50, binary / Python / Node) | 1.5 / 0.4 / 0.7 ms | 8 |
 
 ## Appendix D: general troubleshooting
 

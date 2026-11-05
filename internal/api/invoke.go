@@ -83,16 +83,17 @@ func (s *Server) invoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := s.Runner.Run(r.Context(), runner.Request{
-		CodePath: codePath, Payload: payload,
-		MemoryMiB: f.MemoryMiB, VCPUs: f.VCPUs, TimeoutMS: f.TimeoutMS,
-		TenantID: tenant.ID, FunctionID: f.ID, CodeSHA256: f.CodeSHA256,
-	})
+	req := functionRequest(tenant.ID, f, codePath)
+	req.Payload = payload
+	res, err := s.Runner.Run(r.Context(), req)
 	info.vmID = res.VMID
 	info.start = res.StartKind
 	switch {
 	case errors.Is(err, runner.ErrBusy):
 		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	case errors.Is(err, runner.ErrRuntimeUnavailable):
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	case errors.Is(err, context.Canceled) && r.Context().Err() != nil:
@@ -114,6 +115,10 @@ func (s *Server) invoke(w http.ResponseWriter, r *http.Request) {
 	h.Set(apitypes.HeaderFetchMS, strconv.FormatInt(fetchMS, 10))
 	h.Set(apitypes.HeaderStart, res.StartKind)
 	h.Set(apitypes.HeaderUploadMS, strconv.FormatInt(res.UploadMS, 10))
+	if res.Snapshot != "" {
+		h.Set(apitypes.HeaderSnapshot, res.Snapshot)
+	}
+	h.Set(apitypes.HeaderLoadMS, strconv.FormatInt(res.LoadMS, 10))
 
 	if res.FunctionError != "" {
 		code := res.ExitCode

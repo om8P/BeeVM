@@ -17,13 +17,20 @@ import (
 func snapshotManager(home string, logf func(string, ...any)) (*snapshot.Manager, error) {
 	base := vmConfig(home, snapshot.BootArgs, 1, 128)
 	base.BaseDir = filepath.Join(home, "run", "vms")
-	return snapshot.New(filepath.Join(home, "snapshots"), base, logf)
+	m, err := snapshot.New(filepath.Join(home, "snapshots"), base, logf)
+	if err != nil {
+		return nil, err
+	}
+	for rt, path := range runtimeImages(home) {
+		m.SetRootfs(rt, path)
+	}
+	return m, nil
 }
 
 // runSnapshot handles `beevmd snapshot build|ls|rm`.
 func runSnapshot(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: beevmd snapshot build [--mem N] [--vcpus N] | ls | rm <key> | rm --stale")
+		fmt.Fprintln(os.Stderr, "usage: beevmd snapshot build [--runtime binary|python|node] [--mem N] [--vcpus N] | ls | rm <key> | rm --stale")
 		return 2
 	}
 	home := beevmHome()
@@ -39,16 +46,21 @@ func runSnapshot(args []string) int {
 		fs := flag.NewFlagSet("snapshot build", flag.ExitOnError)
 		mem := fs.Int64("mem", 128, "guest memory in MiB")
 		vcpus := fs.Int64("vcpus", 1, "number of virtual CPUs")
+		rt := fs.String("runtime", "binary", "runtime snapshot to build: binary, python or node")
 		_ = fs.Parse(args[1:])
+		if !m.HasRuntime(*rt) {
+			fmt.Fprintf(os.Stderr, "error: no image for runtime %q (run: make images)\n", *rt)
+			return 1
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		s, err := m.Ensure(ctx, *mem, *vcpus)
+		s, err := m.EnsureRuntime(ctx, *rt, *mem, *vcpus)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			return 1
 		}
-		fmt.Printf("snapshot %s: %d MiB, %d vCPU, memory file %s, in %s\n",
-			s.Key, s.Inputs.MemMiB, s.Inputs.VCPUs, humanBytes(s.MemBytes), s.Dir)
+		fmt.Printf("snapshot %s (%s runtime): %d MiB, %d vCPU, memory file %s, in %s\n",
+			s.Key, s.RuntimeName(), s.Inputs.MemMiB, s.Inputs.VCPUs, humanBytes(s.MemBytes), s.Dir)
 		return 0
 
 	case "ls":
@@ -62,14 +74,19 @@ func runSnapshot(args []string) int {
 			return 0
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "KEY\tMEMORY\tVCPUS\tSIZE\tBUILD\tCREATED\tSTATUS")
+		fmt.Fprintln(w, "KEY\tKIND\tRUNTIME\tFUNCTION\tMEMORY\tVCPUS\tSIZE\tBUILD\tCREATED\tSTATUS")
 		for _, s := range list {
 			status := "current"
 			if !s.Current {
 				status = "stale (images or build changed)"
 			}
-			fmt.Fprintf(w, "%s\t%d MiB\t%d\t%s\t%d ms\t%s\t%s\n", s.Key, s.Inputs.MemMiB, s.Inputs.VCPUs,
-				humanBytes(s.MemBytes), s.BuildMS, s.CreatedAt.Local().Format("2006-01-02 15:04:05"), status)
+			fn := "-"
+			if s.Function != nil {
+				fn = fmt.Sprintf("%d (tenant %d)", s.Function.FunctionID, s.Function.TenantID)
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d MiB\t%d\t%s\t%d ms\t%s\t%s\n", s.Key, s.Kind, s.RuntimeName(), fn,
+				s.Inputs.MemMiB, s.Inputs.VCPUs, humanBytes(s.MemBytes), s.BuildMS,
+				s.CreatedAt.Local().Format("2006-01-02 15:04:05"), status)
 		}
 		w.Flush()
 		return 0

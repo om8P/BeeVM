@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -24,6 +26,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/om8P/BeeVM/internal/pkg"
 	"github.com/om8P/BeeVM/internal/pool"
 	"github.com/om8P/BeeVM/internal/runner"
 	"github.com/om8P/BeeVM/internal/snapshot"
@@ -44,6 +47,7 @@ type benchRun struct {
 	FaultsFn float64 // restore: page faults during upload + invoke
 	Ready    float64 // start until the agent answered (restore: including the resume call)
 	Upload   float64 // sending the function's code into the VM
+	Import   float64 // python/node: starting the runtime and importing the code
 	Invoke   float64 // the call itself, round trip
 	First    float64 // start until the function's answer arrived: what a caller waits
 }
@@ -55,17 +59,18 @@ var benchMetrics = []struct {
 	only     string // comma-separated modes; "" = every mode
 	optional bool   // left out when every value is 0 (the flag that fills it was not set)
 }{
-	{"spawn", func(r benchRun) float64 { return r.Spawn }, "restore", false},
-	{"load", func(r benchRun) float64 { return r.Load }, "restore", false},
-	{"fc load", func(r benchRun) float64 { return r.FCLoad }, "restore", true},
-	{"connect", func(r benchRun) float64 { return r.Connect }, "restore", true},
-	{"agent", func(r benchRun) float64 { return r.Agent }, "restore", false},
-	{"attempts (n)", func(r benchRun) float64 { return r.Attempts }, "restore", true},
-	{"faults agent (n)", func(r benchRun) float64 { return r.FaultsAg }, "restore", true},
-	{"faults call (n)", func(r benchRun) float64 { return r.FaultsFn }, "restore", true},
-	{"vm ready", func(r benchRun) float64 { return r.Ready }, "boot,restore", false},
+	{"spawn", func(r benchRun) float64 { return r.Spawn }, "restore,function", false},
+	{"load", func(r benchRun) float64 { return r.Load }, "restore,function", false},
+	{"fc load", func(r benchRun) float64 { return r.FCLoad }, "restore,function", true},
+	{"connect", func(r benchRun) float64 { return r.Connect }, "restore,function", true},
+	{"agent", func(r benchRun) float64 { return r.Agent }, "restore,function", false},
+	{"attempts (n)", func(r benchRun) float64 { return r.Attempts }, "restore,function", true},
+	{"faults agent (n)", func(r benchRun) float64 { return r.FaultsAg }, "restore,function", true},
+	{"faults call (n)", func(r benchRun) float64 { return r.FaultsFn }, "restore,function", true},
+	{"vm ready", func(r benchRun) float64 { return r.Ready }, "boot,restore,function", false},
 	{"upload", func(r benchRun) float64 { return r.Upload }, "boot,restore", false},
-	{"invoke", func(r benchRun) float64 { return r.Invoke }, "boot,restore", false},
+	{"import", func(r benchRun) float64 { return r.Import }, "boot,restore", true},
+	{"invoke", func(r benchRun) float64 { return r.Invoke }, "boot,restore,function", false},
 	{"first response", func(r benchRun) float64 { return r.First }, "", false},
 }
 
@@ -87,7 +92,10 @@ type benchSettings struct {
 	Runs      int
 	Mem       int64
 	VCPUs     int64
-	Code      string
+	Code      string // the binary or zip package that is uploaded
+	CodeName  string // what was given on the command line (for the summary)
+	Runtime   string // binary, python or node
+	Handler   string // python/node
 	Payload   string
 	Probe     string        // restore: "resume" (one request) or "health" (old way: /health, then /resume)
 	Gap       time.Duration // pause after every run
@@ -100,7 +108,8 @@ type benchSettings struct {
 // runBench handles `beevmd bench coldstart`.
 func runBench(args []string) int {
 	if len(args) == 0 || args[0] != "coldstart" {
-		fmt.Fprintln(os.Stderr, "usage: beevmd bench coldstart [--runs N] [--mode boot,restore,warm] [--code F] [--out DIR]")
+		fmt.Fprintln(os.Stderr, "usage: beevmd bench coldstart [--runs N] [--mode boot,restore,function,warm] [--code F] [--out DIR]")
+		fmt.Fprintln(os.Stderr, "         [--runtime binary|python|node] [--handler H]")
 		fmt.Fprintln(os.Stderr, "         [--mem N] [--vcpus N] [--probe resume|health] [--gap D] [--cold-cache]")
 		fmt.Fprintln(os.Stderr, "         [--settle D] [--fc-metrics] [--pin CPUS]")
 		return 2
@@ -108,8 +117,11 @@ func runBench(args []string) int {
 	var s benchSettings
 	fs := flag.NewFlagSet("bench coldstart", flag.ExitOnError)
 	fs.IntVar(&s.Runs, "runs", 100, "measured cold starts per mode")
-	modes := fs.String("mode", "boot,restore", "comma-separated: boot, restore, warm (repeat calls through the warm pool)")
-	fs.StringVar(&s.Code, "code", "bin/functions/hello-go-binary", "function binary to run")
+	modes := fs.String("mode", "boot,restore", "comma-separated: boot, restore (runtime snapshot + upload + import), "+
+		"function (function snapshot: code already inside), warm (repeat calls through the warm pool)")
+	fs.StringVar(&s.CodeName, "code", "bin/functions/hello-go-binary", "the function: a binary, or a folder/.py/.js/.zip")
+	fs.StringVar(&s.Runtime, "runtime", "", "binary, python or node (default: detected from --code)")
+	fs.StringVar(&s.Handler, "handler", "", "python/node handler (default handler.handler / index.handler)")
 	fs.StringVar(&s.Payload, "payload", `{"name":"bench"}`, "JSON payload")
 	out := fs.String("out", "bench/results", "folder for the CSV and summary")
 	fs.Int64Var(&s.Mem, "mem", 128, "guest memory in MiB")
@@ -121,15 +133,21 @@ func runBench(args []string) int {
 	fs.BoolVar(&s.FCMetrics, "fc-metrics", false, "restore: also record Firecracker's own snapshot load time")
 	pin := fs.String("pin", "", "restore: comma-separated host CPUs for the firecracker process, e.g. 3")
 	_ = fs.Parse(args[1:])
-	if _, err := os.Stat(s.Code); err != nil {
+	if _, err := os.Stat(s.CodeName); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err, "(run: make examples)")
 		return 2
 	}
+	fn, err := openCode(s.CodeName, s.Runtime, s.Handler)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 2
+	}
+	defer fn.Close()
+	s.Code, s.Runtime, s.Handler = fn.Path, fn.Runtime, fn.Handler
 	if s.Probe != "resume" && s.Probe != "health" {
 		fmt.Fprintf(os.Stderr, "error: --probe must be resume or health, not %q\n", s.Probe)
 		return 2
 	}
-	var err error
 	if s.Pin, err = parseCPUs(*pin); err != nil {
 		fmt.Fprintln(os.Stderr, "error: --pin:", err)
 		return 2
@@ -138,6 +156,7 @@ func runBench(args []string) int {
 	home := beevmHome()
 	cfg := vmConfig(home, snapshot.BootArgs, s.VCPUs, s.Mem)
 	cfg.SharedRootfs = true
+	cfg.RootfsPath = rootfsFor(home, s.Runtime)
 	cfg.BaseDir = filepath.Join(home, "run", "bench")
 	_ = os.RemoveAll(cfg.BaseDir)
 	defer os.RemoveAll(cfg.BaseDir)
@@ -164,6 +183,27 @@ func runBench(args []string) int {
 			rcfg := cfg
 			rcfg.FirecrackerMetrics, rcfg.CPUs = s.FCMetrics, s.Pin
 			one = func(i int) (benchRun, error) { return benchRestore(sigCtx, rcfg, snap, s, i) }
+		case "function":
+			// The function's own snapshot (code uploaded and imported before freezing). Built
+			// for a made-up function 0 and deleted again at the end.
+			m, err := benchManager(home, cfg.BaseDir, s)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "error: snapshot:", err)
+				return 1
+			}
+			bctx, cancel := context.WithTimeout(sigCtx, 3*time.Minute)
+			fsnap, err := m.EnsureFunction(bctx, benchFunctionSpec(s))
+			cancel()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "error: function snapshot:", err)
+				return exitFor(sigCtx, 1)
+			}
+			defer m.RemoveFunction(benchFunctionID)
+			snap = fsnap
+			cached = append(cached, fsnap.Files.StatePath, fsnap.Files.MemPath)
+			rcfg := cfg
+			rcfg.FirecrackerMetrics, rcfg.CPUs = s.FCMetrics, s.Pin
+			one = func(i int) (benchRun, error) { return benchRestore(sigCtx, rcfg, fsnap, s, i) }
 		case "warm":
 			snap, err = benchSnapshot(sigCtx, home, cfg.BaseDir, s)
 			if err != nil {
@@ -174,10 +214,13 @@ func runBench(args []string) int {
 			// measured call reuses it.
 			w := runner.NewWarmRunner(cfg, fixedSnapshot{snap}, pool.Config{MaxVMs: 1, KeepAlive: time.Hour},
 				slog.New(slog.NewTextHandler(io.Discard, nil)))
+			for rt, path := range runtimeImages(home) {
+				w.SetRootfs(rt, path)
+			}
 			defer w.Close()
 			one = func(i int) (benchRun, error) { return benchWarm(sigCtx, w, s, i) }
 		default:
-			fmt.Fprintf(os.Stderr, "error: unknown mode %q (boot, restore or warm)\n", mode)
+			fmt.Fprintf(os.Stderr, "error: unknown mode %q (boot, restore, function or warm)\n", mode)
 			return 2
 		}
 		fmt.Printf("== %s: 1 warm-up + %d measured runs, one at a time\n", mode, s.Runs)
@@ -221,27 +264,48 @@ func runBench(args []string) int {
 	return 0
 }
 
-// benchSnapshot returns the snapshot to restore from: the normal one, or with --settle a
-// throw-away one built in the bench folder (deleted when the benchmark ends).
-func benchSnapshot(ctx context.Context, home, benchDir string, s benchSettings) (snapshot.Snapshot, error) {
+// benchManager is the Snapshot Manager the benchmark uses: the normal one, or with --settle a
+// throw-away one in the bench folder (deleted when the benchmark ends).
+func benchManager(home, benchDir string, s benchSettings) (*snapshot.Manager, error) {
 	say := func(f string, a ...any) { fmt.Printf("== "+f+"\n", a...) }
-	var m *snapshot.Manager
-	var err error
-	if s.Settle > 0 {
-		m, err = snapshot.New(filepath.Join(benchDir, "snapshots"), vmConfig(home, snapshot.BootArgs, 1, 128), say)
-		if err == nil {
-			m.SetSettle(s.Settle)
-			say("throw-away snapshot with settle %s", s.Settle)
-		}
-	} else {
-		m, err = snapshotManager(home, say)
+	if s.Settle <= 0 {
+		return snapshotManager(home, say)
 	}
+	m, err := snapshot.New(filepath.Join(benchDir, "snapshots"), vmConfig(home, snapshot.BootArgs, 1, 128), say)
+	if err != nil {
+		return nil, err
+	}
+	for rt, path := range runtimeImages(home) {
+		m.SetRootfs(rt, path)
+	}
+	m.SetSettle(s.Settle)
+	say("throw-away snapshot with settle %s", s.Settle)
+	return m, nil
+}
+
+// benchSnapshot returns the runtime snapshot to restore from (see benchManager).
+func benchSnapshot(ctx context.Context, home, benchDir string, s benchSettings) (snapshot.Snapshot, error) {
+	m, err := benchManager(home, benchDir, s)
 	if err != nil {
 		return snapshot.Snapshot{}, err
 	}
 	bctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	return m.Ensure(bctx, s.Mem, s.VCPUs)
+	return m.EnsureRuntime(bctx, s.Runtime, s.Mem, s.VCPUs)
+}
+
+// benchFunctionID is the made-up function the benchmark builds its function snapshot for.
+// No real function has ID 0, and the server removes such leftovers at start-up.
+const benchFunctionID = 0
+
+func benchFunctionSpec(s benchSettings) snapshot.FunctionSpec {
+	sum := "bench"
+	if b, err := os.ReadFile(s.Code); err == nil {
+		h := sha256.Sum256(b)
+		sum = hex.EncodeToString(h[:])
+	}
+	return snapshot.FunctionSpec{Runtime: s.Runtime, Handler: s.Handler, FunctionID: benchFunctionID,
+		CodeSHA256: sum, CodePath: s.Code, MemMiB: s.Mem, VCPUs: s.VCPUs}
 }
 
 func ms(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
@@ -267,9 +331,13 @@ func benchBoot(ctx context.Context, cfg vmm.Config, s benchSettings, i int) (ben
 	return r, benchCall(readyCtx, vm, s, t0, &r)
 }
 
-// benchRestore measures one restore from snap, resume, upload and call.
+// benchRestore measures one restore from snap, resume, upload (and import) and call. From a
+// function snapshot (mode "function") the code is already inside: no upload, no import.
 func benchRestore(ctx context.Context, cfg vmm.Config, snap snapshot.Snapshot, s benchSettings, i int) (benchRun, error) {
 	r := benchRun{Mode: "restore", Run: i}
+	if snap.IsFunction() {
+		r.Mode = "function"
+	}
 	readyCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	t0 := time.Now()
@@ -317,12 +385,27 @@ func benchRestore(ctx context.Context, cfg vmm.Config, snap snapshot.Snapshot, s
 	return r, nil
 }
 
-// fixedSnapshot hands the warm runner the snapshot the benchmark already chose.
+// fixedSnapshot hands the warm runner the runtime snapshot the benchmark already chose. It
+// has no function snapshots, so the warm-up call restores the runtime snapshot and imports.
 type fixedSnapshot struct{ snap snapshot.Snapshot }
 
 func (f fixedSnapshot) Ensure(context.Context, int64, int64) (snapshot.Snapshot, error) {
 	return f.snap, nil
 }
+
+func (f fixedSnapshot) EnsureRuntime(context.Context, string, int64, int64) (snapshot.Snapshot, error) {
+	return f.snap, nil
+}
+
+func (f fixedSnapshot) LookupFunction(snapshot.FunctionSpec) (snapshot.Snapshot, bool) {
+	return snapshot.Snapshot{}, false
+}
+
+func (f fixedSnapshot) EnsureFunction(context.Context, snapshot.FunctionSpec) (snapshot.Snapshot, error) {
+	return snapshot.Snapshot{}, errors.New("no function snapshots in the warm benchmark")
+}
+
+func (f fixedSnapshot) RemoveFunction(int64) (int, error) { return 0, nil }
 
 // benchWarm measures one call through the warm pool: take the idle VM, call the function, give
 // the VM back. Run 0 (the warm-up) creates the VM; every later run must reuse it.
@@ -335,7 +418,7 @@ func benchWarm(ctx context.Context, w *runner.WarmRunner, s benchSettings, i int
 	t0 := time.Now()
 	res, err := w.Run(ctx, runner.Request{
 		CodePath: code, Payload: json.RawMessage(s.Payload), MemoryMiB: s.Mem, VCPUs: s.VCPUs, TimeoutMS: 10_000,
-		TenantID: 1, FunctionID: 1, CodeSHA256: "bench",
+		Runtime: s.Runtime, Handler: s.Handler, TenantID: 1, FunctionID: 1, CodeSHA256: "bench",
 	})
 	r.First = ms(time.Since(t0))
 	if err != nil {
@@ -350,13 +433,29 @@ func benchWarm(ctx context.Context, w *runner.WarmRunner, s benchSettings, i int
 	return r, nil
 }
 
-// benchCall uploads the function and calls it once, filling Upload, Invoke and First.
+// benchCall uploads the function (and imports it, for python/node) and calls it once, filling
+// Upload, Import, Invoke and First. In mode "function" the code is already inside the VM.
 func benchCall(ctx context.Context, vm *vmm.VM, s benchSettings, t0 time.Time, r *benchRun) error {
-	t1 := time.Now()
-	if _, err := vm.Agent().UploadFunctionFile(ctx, s.Code); err != nil {
-		return fmt.Errorf("upload: %w", err)
+	if r.Mode != "function" {
+		t1 := time.Now()
+		var err error
+		if pkg.IsPackaged(s.Runtime) {
+			_, err = vm.Agent().UploadPackageFile(ctx, s.Code)
+		} else {
+			_, err = vm.Agent().UploadFunctionFile(ctx, s.Code)
+		}
+		if err != nil {
+			return fmt.Errorf("upload: %w", err)
+		}
+		r.Upload = ms(time.Since(t1))
+		if pkg.IsPackaged(s.Runtime) {
+			t1 = time.Now()
+			if _, err := vm.Agent().Load(ctx, s.Runtime, s.Handler, 0); err != nil {
+				return fmt.Errorf("import: %w", err)
+			}
+			r.Import = ms(time.Since(t1))
+		}
 	}
-	r.Upload = ms(time.Since(t1))
 	t2 := time.Now()
 	res, err := vm.Agent().Invoke(ctx, json.RawMessage(s.Payload), 10*time.Second)
 	if err != nil {
@@ -518,10 +617,10 @@ func writeBench(dir string, results []benchRun, table string, snap snapshot.Snap
 	}
 	cw := csv.NewWriter(f)
 	_ = cw.Write([]string{"mode", "run", "spawn_ms", "load_ms", "fc_load_ms", "connect_ms", "agent_ms", "attempts", "faults_agent", "faults_call",
-		"ready_ms", "upload_ms", "invoke_ms", "first_response_ms"})
+		"ready_ms", "upload_ms", "import_ms", "invoke_ms", "first_response_ms"})
 	for _, r := range results {
 		_ = cw.Write([]string{r.Mode, fmt.Sprint(r.Run), f2(r.Spawn), f2(r.Load), f2(r.FCLoad), f2(r.Connect), f2(r.Agent),
-			fmt.Sprint(r.Attempts), fmt.Sprint(r.FaultsAg), fmt.Sprint(r.FaultsFn), f2(r.Ready), f2(r.Upload), f2(r.Invoke), f2(r.First)})
+			fmt.Sprint(r.Attempts), fmt.Sprint(r.FaultsAg), fmt.Sprint(r.FaultsFn), f2(r.Ready), f2(r.Upload), f2(r.Import), f2(r.Invoke), f2(r.First)})
 	}
 	cw.Flush()
 	if err := errors.Join(cw.Error(), f.Close()); err != nil {
@@ -536,12 +635,15 @@ func writeBench(dir string, results []benchRun, table string, snap snapshot.Snap
 	if snap.Key != "" {
 		fmt.Fprintf(&md, "- Firecracker: %s; snapshot %s (memory file %s)\n", snap.Inputs.FirecrackerVersion, snap.Key, humanBytes(snap.MemBytes))
 	}
-	fmt.Fprintf(&md, "- VM: %d MiB, %d vCPU; function %s; %d measured runs per mode after 1 warm-up, one at a time\n", s.Mem, s.VCPUs, filepath.Base(s.Code), s.Runs)
+	fmt.Fprintf(&md, "- VM: %d MiB, %d vCPU; function %s (%s); %d measured runs per mode after 1 warm-up, one at a time\n",
+		s.Mem, s.VCPUs, filepath.Base(s.CodeName), s.Runtime, s.Runs)
 	fmt.Fprintf(&md, "- Settings: %s. Raw data: `%s`\n\n", describeSettings(s), filepath.Base(csvPath))
 	fmt.Fprintf(&md, "- **load**: our `PUT /snapshot/load` request (incl. resuming the vCPUs); **fc load**: the same, as Firecracker measured it\n")
 	fmt.Fprintf(&md, "- **agent**: after the load until the guest agent answered `/resume` (clock and entropy fixed); **connect**: until `/health` answered (probe health only)\n")
 	fmt.Fprintf(&md, "- **vm ready**: start until the guest agent is ready (restore: spawn + load + agent)\n")
 	fmt.Fprintf(&md, "- **first response**: start until the function's answer arrived, including uploading its code\n")
+	fmt.Fprintf(&md, "- **import** (python/node): starting the runtime's import of the uploaded package\n")
+	fmt.Fprintf(&md, "- **function**: restored from the function's own snapshot: code already uploaded and imported, so no upload or import\n")
 	fmt.Fprintf(&md, "- **warm**: a repeat call through the warm pool (take the idle VM, call, give it back); no restore, no upload\n\n")
 	fmt.Fprintf(&md, "```text\n%s```\n", table)
 	mdPath := filepath.Join(dir, "coldstart-"+stamp+".md")

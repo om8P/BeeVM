@@ -188,3 +188,48 @@ func (c *AgentClient) Resume(ctx context.Context) (agentproto.ResumeResponse, er
 	err = c.do(ctx, http.MethodPost, agentproto.PathResume, bytes.NewReader(body), int64(len(body)), &out)
 	return out, err
 }
+
+// UploadPackage sends a zip package (Python/Node.js function) read from r (size bytes); the
+// agent unpacks it into agentproto.CodeDir.
+func (c *AgentClient) UploadPackage(ctx context.Context, r io.Reader, size int64) (agentproto.UploadResponse, error) {
+	var u agentproto.UploadResponse
+	err := c.do(ctx, http.MethodPut, agentproto.PathPackage, r, size, &u)
+	return u, err
+}
+
+// UploadPackageFile uploads the zip package at path.
+func (c *AgentClient) UploadPackageFile(ctx context.Context, path string) (agentproto.UploadResponse, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return agentproto.UploadResponse{}, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return agentproto.UploadResponse{}, err
+	}
+	return c.UploadPackage(ctx, f, st.Size())
+}
+
+// LoadError is a failed import of the user's code (a bug in the function, such as a syntax
+// error or a missing module): the VM is fine, the code is not. Msg holds the traceback/stack.
+type LoadError struct{ Msg string }
+
+func (e *LoadError) Error() string { return "load failed: " + e.Msg }
+
+// Load starts the runtime's shim and, if handler is set, imports the uploaded package and
+// finds the handler. An empty handler only starts the interpreter (runtime snapshots).
+// A failing import returns a *LoadError.
+func (c *AgentClient) Load(ctx context.Context, runtime, handler string, timeout time.Duration) (agentproto.LoadResponse, error) {
+	body, err := json.Marshal(agentproto.LoadRequest{Runtime: runtime, Handler: handler, TimeoutMS: timeout.Milliseconds()})
+	if err != nil {
+		return agentproto.LoadResponse{}, err
+	}
+	var out agentproto.LoadResponse
+	err = c.do(ctx, http.MethodPost, agentproto.PathLoad, bytes.NewReader(body), int64(len(body)), &out)
+	var se *statusError
+	if errors.As(err, &se) && se.code == http.StatusUnprocessableEntity {
+		return out, &LoadError{Msg: se.msg}
+	}
+	return out, err
+}

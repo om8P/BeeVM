@@ -1,9 +1,14 @@
 // Package runner runs one function call inside a MicroVM and returns the result.
 //
 // The API server only knows the Runner interface. ColdRunner boots a fresh VM for every
-// call; SnapshotRunner restores one from a base snapshot instead (milestone 6), which is
-// about 25 times faster. WarmRunner (milestone 7) keeps VMs alive between calls in a warm
-// pool, so repeat calls skip the restore and the upload.
+// call; SnapshotRunner restores one from a snapshot instead (milestone 6), which is about 25
+// times faster. WarmRunner (milestone 7) keeps VMs alive between calls in a warm pool, so
+// repeat calls skip the restore and the upload.
+//
+// Milestone 8 added runtimes (binary, python, node) and function snapshots: a VM is restored
+// from the function's own snapshot (code already uploaded and imported) when there is one,
+// otherwise from its runtime's snapshot, and then gets the code. After such a slow start the
+// function snapshot is built in the background, so later VMs start the fast way.
 package runner
 
 import (
@@ -12,9 +17,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/om8P/BeeVM/internal/agentproto"
+	"github.com/om8P/BeeVM/internal/pkg"
 	"github.com/om8P/BeeVM/internal/snapshot"
 	"github.com/om8P/BeeVM/internal/vmm"
 )
@@ -24,17 +33,26 @@ var ErrBusy = errors.New("too many VMs running, try again shortly")
 
 // Request is one function call.
 type Request struct {
-	CodePath  string          // the function binary on the host
+	CodePath  string          // the function binary (or zip package) on the host
 	Payload   json.RawMessage // JSON input for the function
+	Runtime   string          // "binary" (also when empty), "python" or "node"
+	Handler   string          // python/node: the function to call inside the package
 	MemoryMiB int64
 	VCPUs     int64
 	TimeoutMS int64 // limit for the function itself
 
-	// Which function this is. Only the warm pool uses these: a VM is reused only for calls
-	// of the same function with the same code.
+	// Which function this is. The warm pool reuses a VM only for calls of the same function
+	// with the same code, and function snapshots belong to one function.
 	TenantID   int64
 	FunctionID int64
 	CodeSHA256 string
+}
+
+func (r Request) runtime() string {
+	if r.Runtime == "" {
+		return agentproto.RuntimeBinary
+	}
+	return r.Runtime
 }
 
 // How a VM was started for a call.
@@ -44,8 +62,18 @@ const (
 	StartWarm    = "warm"    // an idle VM from the warm pool, code already loaded
 )
 
+// Which snapshot a restored VM came from.
+const (
+	SnapshotFunction = "function" // the function's own snapshot: code already uploaded and imported
+	SnapshotRuntime  = "runtime"  // the runtime's snapshot: code still had to be uploaded (and imported)
+)
+
+// ErrRuntimeUnavailable means this server has no image for the function's runtime (for
+// example `make images` was not run for Python). The API answers 503.
+var ErrRuntimeUnavailable = errors.New("runtime not available on this server")
+
 // Result is what came back. If FunctionError is set, the VM worked but the function failed
-// (non-zero exit, timeout, bad output); Output is then empty.
+// (non-zero exit, timeout, bad output, import error); Output is then empty.
 type Result struct {
 	Output        json.RawMessage
 	Stderr        string // the function's log
@@ -53,9 +81,11 @@ type Result struct {
 	FunctionError string
 
 	VMID       string
-	StartKind  string // StartBoot or StartRestore
+	StartKind  string // StartBoot, StartRestore or StartWarm
+	Snapshot   string // for StartRestore: SnapshotFunction or SnapshotRuntime
 	BootMS     int64  // starting the VM until its agent was ready
 	UploadMS   int64  // sending the function's code into the VM
+	LoadMS     int64  // python/node: starting the runtime and importing the code
 	FunctionMS int64  // reported by the agent
 	TotalMS    int64  // the whole Run
 }
@@ -92,6 +122,51 @@ func (l limiter) acquire(ctx context.Context) (release func(), err error) {
 	}
 }
 
+// images knows the root filesystem image of each runtime. Binaries use the base config's
+// RootfsPath; python and node are added with SetRootfs.
+type images struct {
+	mu     sync.Mutex
+	rootfs map[string]string
+}
+
+// SetRootfs sets the root filesystem image of a runtime ("python", "node").
+func (i *images) SetRootfs(runtime, path string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.rootfs == nil {
+		i.rootfs = map[string]string{}
+	}
+	i.rootfs[runtime] = path
+}
+
+// HasRuntime implements RuntimeChecker: binaries always run; python and node need their image.
+func (i *images) HasRuntime(runtime string) bool {
+	if runtime == "" || runtime == agentproto.RuntimeBinary {
+		return true
+	}
+	i.mu.Lock()
+	path := i.rootfs[runtime]
+	i.mu.Unlock()
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// configFor is base with the runtime's root filesystem.
+func (i *images) configFor(base vmm.Config, runtime string) vmm.Config {
+	if runtime == "" || runtime == agentproto.RuntimeBinary {
+		return base
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if p := i.rootfs[runtime]; p != "" {
+		base.RootfsPath = p
+	}
+	return base
+}
+
 // readyTimeout limits how long we wait for a VM to boot (or restore) and its agent to answer.
 const readyTimeout = 20 * time.Second
 
@@ -107,6 +182,7 @@ func agentConfig(base vmm.Config) vmm.Config {
 // WSL2) but simple and isolated. At most maxVMs run at once.
 type ColdRunner struct {
 	limiter
+	images
 	base vmm.Config // paths and kernel settings; memory and vCPUs come from each request
 }
 
@@ -118,13 +194,16 @@ func NewColdRunner(base vmm.Config, maxVMs int, queueWait time.Duration) *ColdRu
 
 // Run implements Runner.
 func (c *ColdRunner) Run(ctx context.Context, req Request) (Result, error) {
+	if !c.HasRuntime(req.Runtime) {
+		return Result{}, ErrRuntimeUnavailable
+	}
 	start := time.Now()
 	release, err := c.acquire(ctx)
 	if err != nil {
 		return Result{}, err
 	}
 	defer release()
-	res, err := bootAndRun(ctx, c.base, req)
+	res, err := bootAndRun(ctx, c.configFor(c.base, req.Runtime), req)
 	res.TotalMS = time.Since(start).Milliseconds()
 	return res, err
 }
@@ -141,7 +220,7 @@ func bootAndRun(ctx context.Context, base vmm.Config, req Request) (Result, erro
 	// The VM is disposable: Cleanup kills it at once and deletes its folder. No graceful
 	// shutdown is needed, and skipping it keeps the response fast.
 	defer vm.Cleanup(false)
-	return res, runOn(ctx, readyCtx, vm, req, &res)
+	return res, runOn(ctx, readyCtx, vm, req, &res, false)
 }
 
 // bootReady boots a new VM and waits until its agent answers. It fills in VMID and BootMS.
@@ -168,22 +247,77 @@ func bootReady(ctx context.Context, base vmm.Config, req Request, res *Result) (
 	return vm, nil
 }
 
-// runOn uploads the function to a ready VM and calls it once.
-func runOn(ctx, readyCtx context.Context, vm *vmm.VM, req Request, res *Result) error {
-	if err := uploadCode(readyCtx, vm, req, res); err != nil {
-		return err
+// runOn gives a ready VM the function's code (unless codeInside: it came from a function
+// snapshot) and calls it once. Code that does not import is a function failure, not an error.
+func runOn(ctx, readyCtx context.Context, vm *vmm.VM, req Request, res *Result, codeInside bool) error {
+	if !codeInside {
+		if err := putCode(readyCtx, vm, req, res); err != nil {
+			return loadFailure(err, req, res)
+		}
 	}
 	return callFunction(ctx, vm, req, res)
 }
 
-// uploadCode sends the function's binary into a ready VM.
+// putCode uploads the function and, for python/node, imports it.
+func putCode(ctx context.Context, vm *vmm.VM, req Request, res *Result) error {
+	if err := uploadCode(ctx, vm, req, res); err != nil {
+		return err
+	}
+	return loadCode(ctx, vm, req, res)
+}
+
+// uploadCode sends the function's binary (or zip package) into a ready VM.
 func uploadCode(ctx context.Context, vm *vmm.VM, req Request, res *Result) error {
 	t0 := time.Now()
-	if _, err := vm.Agent().UploadFunctionFile(ctx, req.CodePath); err != nil {
+	var err error
+	if pkg.IsPackaged(req.runtime()) {
+		_, err = vm.Agent().UploadPackageFile(ctx, req.CodePath)
+	} else {
+		_, err = vm.Agent().UploadFunctionFile(ctx, req.CodePath)
+	}
+	if err != nil {
 		return fmt.Errorf("upload function: %w", err)
 	}
 	res.UploadMS = time.Since(t0).Milliseconds()
 	return nil
+}
+
+// loadCode starts the runtime and imports the uploaded package (python/node only).
+func loadCode(ctx context.Context, vm *vmm.VM, req Request, res *Result) error {
+	if !pkg.IsPackaged(req.runtime()) {
+		return nil
+	}
+	t0 := time.Now()
+	_, err := vm.Agent().Load(ctx, req.runtime(), req.Handler, 0)
+	res.LoadMS = time.Since(t0).Milliseconds()
+	if err != nil {
+		return fmt.Errorf("load function: %w", err)
+	}
+	return nil
+}
+
+// loadFailure turns an import error of the user's code into a function failure (the API
+// answers 502 with the traceback as the log). Other errors stay errors.
+func loadFailure(err error, req Request, res *Result) error {
+	var le *vmm.LoadError
+	if !errors.As(err, &le) {
+		return err
+	}
+	res.ExitCode = 1
+	res.Stderr = le.Msg
+	res.FunctionError = "function failed to load: " + summaryLine(req.runtime(), le.Msg)
+	return nil
+}
+
+// summaryLine picks the line of an error text that says what went wrong: Python prints it
+// last, Node.js first.
+func summaryLine(runtime, text string) string {
+	lines := strings.Split(strings.TrimSpace(text), "\n")
+	line := lines[0]
+	if runtime == agentproto.RuntimePython {
+		line = lines[len(lines)-1]
+	}
+	return strings.TrimSpace(line)
 }
 
 // callFunction runs the already uploaded function once and fills in res.
@@ -203,15 +337,24 @@ func callFunction(ctx context.Context, vm *vmm.VM, req Request, res *Result) err
 }
 
 // Snapshots is what SnapshotRunner needs from the Snapshot Manager (an interface, so tests can
-// use a fake).
+// use a fake). With only this, VMs are restored from the binary runtime snapshot.
 type Snapshots interface {
 	Ensure(ctx context.Context, memMiB, vcpus int64) (snapshot.Snapshot, error)
 }
 
-// SnapshotRunner restores a VM from a base snapshot for every call: the guest is already
-// booted and its agent running, so the VM is ready in tens of milliseconds. The snapshot for
-// a memory size and vCPU count is built the first time it is needed. If that fails, calls
-// fall back to a full boot (and building is not retried for a minute).
+// RuntimeSnapshots is the rest of the Snapshot Manager: runtime snapshots for python and node,
+// and function snapshots. A Snapshots that also implements it gets the full behaviour.
+type RuntimeSnapshots interface {
+	EnsureRuntime(ctx context.Context, runtime string, memMiB, vcpus int64) (snapshot.Snapshot, error)
+	LookupFunction(spec snapshot.FunctionSpec) (snapshot.Snapshot, bool)
+	EnsureFunction(ctx context.Context, spec snapshot.FunctionSpec) (snapshot.Snapshot, error)
+	RemoveFunction(functionID int64) (int, error)
+}
+
+// SnapshotRunner restores a VM from a snapshot for every call: the guest is already booted
+// and its agent running, so the VM is ready in tens of milliseconds. Snapshots are built the
+// first time they are needed. If a runtime snapshot cannot be built, calls fall back to a full
+// boot (and building is not retried for a minute).
 type SnapshotRunner struct {
 	limiter
 	snapshotPicker
@@ -237,22 +380,29 @@ func NewSnapshotRunner(base vmm.Config, snaps Snapshots, maxVMs int, queueWait t
 	}
 }
 
-// snapshotPicker finds the base snapshot for a call's VM size, and remembers sizes whose
-// snapshot could not be built so those calls boot instead for a while.
+// snapshotPicker finds the snapshot for a call's VM, builds function snapshots in the
+// background, and remembers snapshots that could not be built so it does not retry at once.
 type snapshotPicker struct {
+	images
 	snaps  Snapshots
 	logger *slog.Logger
 
 	mu          sync.Mutex
-	failedUntil map[[2]int64]time.Time // memory and vCPUs -> do not try to build before
+	failedUntil map[string]time.Time // snapshot -> do not try to build before
+	building    map[string]bool      // function snapshots being built in the background
+	closed      bool                 // no new background builds
+	builds      sync.WaitGroup       // background builds still running
 }
 
 func newSnapshotPicker(snaps Snapshots, logger *slog.Logger) snapshotPicker {
-	return snapshotPicker{snaps: snaps, logger: logger, failedUntil: map[[2]int64]time.Time{}}
+	return snapshotPicker{snaps: snaps, logger: logger, failedUntil: map[string]time.Time{}, building: map[string]bool{}}
 }
 
 // Run implements Runner.
 func (s *SnapshotRunner) Run(ctx context.Context, req Request) (Result, error) {
+	if !s.HasRuntime(req.Runtime) {
+		return Result{}, ErrRuntimeUnavailable
+	}
 	start := time.Now()
 	release, err := s.acquire(ctx)
 	if err != nil {
@@ -260,44 +410,163 @@ func (s *SnapshotRunner) Run(ctx context.Context, req Request) (Result, error) {
 	}
 	defer release()
 
+	cfg := s.configFor(s.base, req.Runtime)
 	var res Result
-	if snap, ok := s.snapshotFor(ctx, req); ok {
-		res, err = s.restore(ctx, s.base, snap, req)
+	if snap, ok := s.functionSnapshot(req); ok {
+		res, err = s.restore(ctx, cfg, snap, req)
+	} else if snap, ok := s.snapshotFor(ctx, req); ok {
+		res, err = s.restore(ctx, cfg, snap, req)
+		if err == nil && !strings.HasPrefix(res.FunctionError, "function failed to load") {
+			s.Prepare(req) // next time, start with the code already inside
+		}
 	} else {
-		res, err = s.boot(ctx, s.base, req)
+		res, err = s.boot(ctx, cfg, req)
 	}
 	res.TotalMS = time.Since(start).Milliseconds()
 	return res, err
 }
 
-// snapshotFor returns the snapshot for this call's VM size, building it if needed. It reports
-// false when there is none and the call should boot instead.
-func (s *snapshotPicker) snapshotFor(ctx context.Context, req Request) (snapshot.Snapshot, bool) {
-	size := [2]int64{req.MemoryMiB, req.VCPUs}
+// Close waits for background snapshot builds (so no VM is left running when the server exits).
+func (s *SnapshotRunner) Close() error { return s.waitBuilds(30 * time.Second) }
+
+// failed reports whether building key failed recently.
+func (s *snapshotPicker) failed(key string) bool {
 	s.mu.Lock()
-	until := s.failedUntil[size]
-	s.mu.Unlock()
-	if time.Now().Before(until) {
+	defer s.mu.Unlock()
+	return time.Now().Before(s.failedUntil[key])
+}
+
+func (s *snapshotPicker) markFailed(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failedUntil[key] = time.Now().Add(retryBuildAfter)
+}
+
+// snapshotFor returns the runtime snapshot for this call's runtime and VM size, building it
+// if needed. It reports false when there is none and the call should boot instead.
+func (s *snapshotPicker) snapshotFor(ctx context.Context, req Request) (snapshot.Snapshot, bool) {
+	if s.snaps == nil {
 		return snapshot.Snapshot{}, false
 	}
-	snap, err := s.snaps.Ensure(ctx, req.MemoryMiB, req.VCPUs)
+	key := fmt.Sprintf("%s/%d/%d", req.runtime(), req.MemoryMiB, req.VCPUs)
+	if s.failed(key) {
+		return snapshot.Snapshot{}, false
+	}
+	var snap snapshot.Snapshot
+	var err error
+	if rs, ok := s.snaps.(RuntimeSnapshots); ok {
+		snap, err = rs.EnsureRuntime(ctx, req.runtime(), req.MemoryMiB, req.VCPUs)
+	} else if req.runtime() == agentproto.RuntimeBinary {
+		snap, err = s.snaps.Ensure(ctx, req.MemoryMiB, req.VCPUs)
+	} else {
+		return snapshot.Snapshot{}, false
+	}
 	if err != nil {
 		if ctx.Err() == nil { // not just the caller hanging up
-			s.logger.Error("snapshot unavailable, booting instead", "memory_mib", req.MemoryMiB, "vcpus", req.VCPUs,
-				"retry_in", retryBuildAfter.String(), "error", err)
-			s.mu.Lock()
-			s.failedUntil[size] = time.Now().Add(retryBuildAfter)
-			s.mu.Unlock()
+			s.logger.Error("snapshot unavailable, booting instead", "runtime", req.runtime(), "memory_mib", req.MemoryMiB,
+				"vcpus", req.VCPUs, "retry_in", retryBuildAfter.String(), "error", err)
+			s.markFailed(key)
 		}
 		return snapshot.Snapshot{}, false
 	}
 	return snap, true
 }
 
+func specOf(req Request) snapshot.FunctionSpec {
+	return snapshot.FunctionSpec{Runtime: req.Runtime, Handler: req.Handler, TenantID: req.TenantID,
+		FunctionID: req.FunctionID, CodeSHA256: req.CodeSHA256, CodePath: req.CodePath,
+		MemMiB: req.MemoryMiB, VCPUs: req.VCPUs}
+}
+
+// functionSnapshot returns the call's function snapshot if it has been built. It never builds.
+func (s *snapshotPicker) functionSnapshot(req Request) (snapshot.Snapshot, bool) {
+	rs, ok := s.snaps.(RuntimeSnapshots)
+	if !ok || req.FunctionID == 0 {
+		return snapshot.Snapshot{}, false
+	}
+	return rs.LookupFunction(specOf(req))
+}
+
+func functionBuildKey(req Request) string {
+	return fmt.Sprintf("fn/%d/%s/%s/%d/%d", req.FunctionID, req.CodeSHA256, req.Handler, req.MemoryMiB, req.VCPUs)
+}
+
+// Prepare implements Preparer: it starts building req's function snapshot in the background,
+// unless it exists, is being built, or failed less than a minute ago. It never blocks.
+func (s *snapshotPicker) Prepare(req Request) {
+	rs, ok := s.snaps.(RuntimeSnapshots)
+	if !ok || req.FunctionID == 0 || req.CodePath == "" || !s.HasRuntime(req.Runtime) {
+		return
+	}
+	spec := specOf(req)
+	if _, ok := rs.LookupFunction(spec); ok {
+		return
+	}
+	key := functionBuildKey(req)
+	s.mu.Lock()
+	if s.closed || s.building[key] || time.Now().Before(s.failedUntil[key]) {
+		s.mu.Unlock()
+		return
+	}
+	s.building[key] = true
+	s.builds.Add(1)
+	s.mu.Unlock()
+
+	go func() {
+		defer s.builds.Done()
+		_, err := rs.EnsureFunction(context.Background(), spec)
+		s.mu.Lock()
+		delete(s.building, key)
+		if err != nil {
+			s.failedUntil[key] = time.Now().Add(retryBuildAfter)
+		}
+		s.mu.Unlock()
+		if err != nil {
+			s.logger.Warn("function snapshot not built; calls restore the runtime snapshot instead",
+				"function_id", req.FunctionID, "runtime", req.runtime(), "error", err)
+		}
+	}()
+}
+
+// ForgetFunction implements SnapshotForgetter: it deletes the function's snapshots and
+// forgets failed builds for it (a redeploy may have fixed the code).
+func (s *snapshotPicker) ForgetFunction(functionID int64) {
+	rs, ok := s.snaps.(RuntimeSnapshots)
+	if !ok {
+		return
+	}
+	if _, err := rs.RemoveFunction(functionID); err != nil {
+		s.logger.Warn("remove function snapshots", "function_id", functionID, "error", err)
+	}
+	prefix := fmt.Sprintf("fn/%d/", functionID)
+	s.mu.Lock()
+	for k := range s.failedUntil {
+		if strings.HasPrefix(k, prefix) {
+			delete(s.failedUntil, k)
+		}
+	}
+	s.mu.Unlock()
+}
+
+// waitBuilds stops new background builds and waits up to max for running ones.
+func (s *snapshotPicker) waitBuilds(max time.Duration) error {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	done := make(chan struct{})
+	go func() { s.builds.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-time.After(max):
+		return errors.New("snapshot builds still running")
+	}
+}
+
 // restoreAndRun restores a VM from snap, runs the call on it and throws it away. The caller
-// holds a slot.
+// holds a slot. A VM from a function snapshot already has the code.
 func restoreAndRun(ctx context.Context, base vmm.Config, snap snapshot.Snapshot, req Request) (Result, error) {
-	res := Result{StartKind: StartRestore}
+	res := Result{StartKind: StartRestore, Snapshot: snapshotKind(snap)}
 	readyCtx, cancel := context.WithTimeout(ctx, readyTimeout)
 	defer cancel()
 	vm, err := restoreReady(readyCtx, base, snap, req, &res)
@@ -305,7 +574,14 @@ func restoreAndRun(ctx context.Context, base vmm.Config, snap snapshot.Snapshot,
 		return res, err
 	}
 	defer vm.Cleanup(false)
-	return res, runOn(ctx, readyCtx, vm, req, &res)
+	return res, runOn(ctx, readyCtx, vm, req, &res, snap.IsFunction())
+}
+
+func snapshotKind(snap snapshot.Snapshot) string {
+	if snap.IsFunction() {
+		return SnapshotFunction
+	}
+	return SnapshotRuntime
 }
 
 // restoreReady restores a VM from snap and waits until its agent answers. It fills in VMID and

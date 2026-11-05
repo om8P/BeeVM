@@ -38,6 +38,8 @@ type Key struct {
 	CodeSHA256 string
 	MemoryMiB  int64
 	VCPUs      int64
+	Runtime    string // M8: python/node VMs hold an interpreter with one handler imported
+	Handler    string
 }
 
 // Instance is one running VM with the function's code already loaded.

@@ -14,7 +14,7 @@ Details of each milestone: `docs/milestones.md`.
 | 5 | Artifact store with MinIO/S3 | Done |
 | 6 | Snapshots and fast restore (the core) | Done, refined once (restore p50 45 ms; p99 60-67 ms on WSL2, set by KVM load noise and page faults under nested virtualization; page prefetch needs root on WSL, deferred to the cloud node) |
 | 7 | Warm pool | Done (warm call p50 1.6 ms, p99 5.0 ms in the server; restore + first call 88 ms) |
-| 8 | Python and Node.js runtimes, function snapshots | Not started |
+| 8 | Python and Node.js runtimes, function snapshots | Done (Python 3.14 / Node 24; cold start from a function snapshot p50 58 ms Python, 85 ms Node, 73 ms binary) |
 | 9 | Isolation and networking | Not started |
 | 10 | Observability (optional module) | Not started |
 | 11 | Web dashboard (optional module) | Not started |
@@ -177,3 +177,36 @@ Status values: Not started · In progress · Done · Done, needs refinement (say
   - Idle VMs are not paused (their vCPU is halted anyway); pausing to save CPU is a refine idea, measure first.
 - **Refine later:** `go test -race` under KVM load, eviction policy (LRU across tenants could let one tenant push out another's VMs: per-tenant limits belong with M9), prewarm warm-up call, idle VM memory for M12 density.
 - **Next:** milestone 9 (isolation and networking) per the must-do order, or milestone 8 (Python/Node runtimes).
+
+### 2026-11-05/06: Milestone 8 (Python and Node.js runtimes, function snapshots)
+- **Plan:** `C:\Users\ommga\.claude\plans\read-md-files-and-rosy-lovelace.md`. Agreed: **Python 3.14 + Node.js 24** (Alpine 3.24 has no 3.12/20; Node 20 is end-of-life; CLAUDE.md and architecture.md updated), function snapshots for **all** runtimes incl. binaries, built **in the background on deploy** (a call never waits).
+- **Spike first:** `apk.static` (Alpine's package manager as one static binary) installs `python3`/`nodejs` into the unpacked minirootfs without root or Docker; both run in a 128 MiB VM (Node ~42 MB RSS). Catch: fakeroot cannot see a static binary, so `chown -R 0:0` inside fakeroot fixes ownership. Alpine keeps only the newest package builds (apk-tools-static moved 3.0.8 -> 3.0.9 within two days), so packages are pinned by major version; installed versions go to `/etc/beevm/versions`.
+- **Images:** `build-rootfs.sh [binary|python|node]` -> `rootfs.ext4` (unchanged), `rootfs-python.ext4` (75 MB), `rootfs-node.ext4` (98 MB); `make images` builds all three; `setup-wsl.sh` too.
+- **Shims** (`guest/shims/python/shim.py`, `guest/shims/node/shim.js`): long-lived process, JSON lines on fd 3 (requests) / fd 4 (answers), so user prints never break the protocol; captures logs per call; `handler(event)` or `(event, context)`; Node awaits async handlers and loads CommonJS or ES modules via `import()`.
+- **Agent:** `PUT /package` (zip, unpacked to `/run/beevm/code`), `POST /load {runtime, handler}` (empty handler = only start the interpreter, used for runtime snapshots; import error = 422). `/invoke` goes to the shim when one is loaded. Timeout kills the shim ("timeout after"), a dead shim gives "runtime exited" (both make the runner throw the VM away); an exception is a normal function failure. Python runs as `python3 -I -B -u`.
+- **`internal/pkg`:** runtimes, default handlers (`handler.handler`, `index.handler`), zip rules used by the API **and** the agent (no absolute paths, `..`, backslashes, symlinks; max 2,000 entries, 32 MiB unpacked, counted on real bytes), `Zip`, `Detect`.
+- **Registry** migration 2 (`handler` column); `Spec.Runtime/Handler` validated; redeploy may change the runtime; `FunctionCodes()`. **API:** config `runtime`/`handler`; binaries keep the ELF check, packages get `pkg.Check`; missing image -> 400 on deploy, 503 on invoke; headers `X-BeeVM-Snapshot`, `X-BeeVM-Load-Ms`; deploy drains + forgets old snapshots + `Prepare`; delete drains + forgets. **CLI:** `beevm deploy <name> <binary|folder|file.py|file.js|zip> [--runtime] [--handler]` (detects the runtime, zips in memory), `ls` RUNTIME column, `invoke -v` shows snapshot kind and load ms.
+- **Snapshot Manager:** `Inputs.Runtime` (omitempty: **binary keys unchanged**, a test pins the old key), rootfs per runtime (`SetRootfs`, `HasRuntime`), `EnsureRuntime`; function snapshots `fn-<key>` (key = parent key + tenant + function + code + handler + `FunctionBuildVersion`): restore the runtime snapshot, upload, import, settle 200 ms, snapshot again; one build at a time; `LookupFunction`, `EnsureFunction`, `RemoveFunction`, `RemoveOrphans`. **Fixed trap:** `List`/`RemoveStale` compared everything with the binary inputs, so `serve` would have deleted every Python/Node snapshot at start-up.
+- **Runner:** new VM = function snapshot if built, else runtime snapshot + upload + import (+ background `Prepare`), else boot (also `ColdRunner`, with the runtime's image). Builds deduplicated per function, failures not retried for 1 min, `ForgetFunction` clears them, `Close` waits for builds. Import errors become 502 "function failed to load: ...". Pool key gains runtime and handler.
+- **vmm:** `UploadPackage(File)`, `Load` (`*LoadError` for 422). **Bug found by the KVM tests:** `Pause`/`CreateSnapshot` only worked for booted VMs (SDK); restored VMs now use our own API client (`PATCH /vm`, `PUT /snapshot/create`).
+- **beevmd:** `serve` registers the images, builds binary/python/node runtime snapshots at start (waited for on shutdown), removes orphaned function snapshots; `snapshot build --runtime`, `snapshot ls` with KIND/RUNTIME/FUNCTION; `invoke --code <dir|.py|.js|.zip> [--runtime] [--handler]`; `bench coldstart` takes the same, new mode `function` and an `import` row.
+- **Examples:** `examples/functions/hello-python/handler.py`, `examples/functions/hello-node/index.js` (async).
+- **Verified:** unit tests in all packages (new: pkg, agent shims with the host's python3 (node tests skip: no node in WSL), registry migration from v1, API runtimes, snapshot tiers + stale fix, runner, CLI, bench table), `-race` for agent/pkg/snapshot/runner/vmm; `go vet` (also `-tags kvm`), gofmt; full `make test-kvm`: **265 passing** (new: real function snapshot build + restore; end to end: hello-python/hello-node from the function snapshot and from the runtime snapshot, syntax error, raise keeps the VM, timeout and `os._exit` replace it, async Node, per-function snapshots removed on delete/redeploy). Hand check with `serve` + CLI: 4 function snapshots built in 440-550 ms each, first calls from them (74 / 89 / 98 ms server total for Python / Node / binary), then warm (1-2 ms); delete removed the snapshot; Ctrl-C exit 0, no process or folder left.
+- **Benchmark** (`bench coldstart --runs 50 --mode boot,restore,function,warm`, user asked for 50 runs instead of 100, so p99 = second slowest; WSL2; raw data `bench/results/m8/`):
+
+  | first response p50 / p99 (ms) | binary | Python | Node.js |
+  |---|---|---|---|
+  | boot | 945 / 1065 | 1023 / 1052 | 1077 / 1157 |
+  | runtime snapshot + upload + import | 87.5 / 124.8 | 86.7 / 104.5 | 149.7 / 173.0 |
+  | **function snapshot** | **73.3 / 90.0** | **58.4 / 74.0** | **85.1 / 124.7** |
+  | warm | 1.5 / 5.6 | 0.4 / 1.2 | 0.7 / 19.8 |
+
+  VM ready is 44-49 ms p50 for every runtime and tier. Function snapshots cut Python by 33 %, Node by 43 %, binary by 16 %. Import alone: Python 64 ms after boot / 31 ms after a runtime snapshot, Node 131 / 89 ms.
+- **Learned / noted:**
+  - The first call after a function-snapshot restore still pays page faults (Python 13 ms, Node 40 ms, binary 23 ms; the binary's call got *slower* than after an upload, 23 vs 14 ms, because the file now sits in snapshot memory). Page prefetch (M6 refine 2, cloud node) targets this.
+  - Warm Python/Node calls (0.4-0.7 ms) beat warm binaries (1.5 ms): no process start.
+  - A function snapshot costs ~128 MiB of disk per function (note for M12 density; diff snapshots are a refine idea). Snapshot builds do not count against `--max-vms`.
+  - Hidden errors hurt twice: the runner's background build failure only went to a discarded test logger, and a benchmark output filter hid the warm mode's "runtime not available" (fixed: the bench's warm runner now gets the images). Look at raw output when numbers are missing.
+  - The Bash tool and heredocs: a quote inside a heredoc broke the command, and `\|` in sed replacements lost its backslash; use the Write/Edit tools for such text.
+- **Refine later:** warm-up call before freezing a function snapshot (needs a warm-up payload contract), diff snapshots / snapshot eviction for disk, prebuild function snapshots for existing functions at `serve` start (now built on their first call), package size limit per memory size, more example functions.
+- **Next:** milestone 9 (isolation and networking).

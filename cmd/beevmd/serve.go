@@ -10,9 +10,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/om8P/BeeVM/internal/agentproto"
 	"github.com/om8P/BeeVM/internal/api"
 	"github.com/om8P/BeeVM/internal/codestore"
 	"github.com/om8P/BeeVM/internal/pool"
@@ -101,8 +104,22 @@ func runServe(args []string) int {
 		return 1
 	}
 
-	// openSnapshots sets up the Snapshot Manager and builds the default-size snapshot in the
-	// background, so the first call does not wait for it.
+	// Runtimes: binaries always run; python and node need their image (make images).
+	images := runtimeImages(home)
+	var available []string
+	for rt, path := range images {
+		if _, err := os.Stat(path); err == nil {
+			available = append(available, rt)
+		} else {
+			logger.Warn("runtime not available: its image is missing (run: make images)", "runtime", rt, "image", path)
+		}
+	}
+	sort.Strings(available)
+
+	// openSnapshots sets up the Snapshot Manager, removes snapshots that no longer fit (other
+	// images, or functions that were deleted or changed), and builds the default-size runtime
+	// snapshots in the background, so the first call does not wait for them.
+	var startup sync.WaitGroup
 	openSnapshots := func() (*snapshot.Manager, error) {
 		snaps, err := snapshot.New(filepath.Join(home, "snapshots"), base, func(f string, a ...any) {
 			logger.Info(fmt.Sprintf(f, a...))
@@ -110,12 +127,25 @@ func runServe(args []string) int {
 		if err != nil {
 			return nil, err
 		}
+		for rt, path := range images {
+			snaps.SetRootfs(rt, path)
+		}
 		if n, err := snaps.RemoveStale(); err == nil && n > 0 {
 			logger.Info("removed snapshots that no longer match the images", "count", n)
 		}
+		if codes, err := reg.FunctionCodes(); err == nil {
+			n, _ := snaps.RemoveOrphans(func(id int64, sha string) bool { return codes[id] == sha })
+			if n > 0 {
+				logger.Info("removed snapshots of deleted or changed functions", "count", n)
+			}
+		}
+		startup.Add(1)
 		go func() {
-			if _, err := snaps.Ensure(context.Background(), registry.DefaultMemoryMiB, registry.DefaultVCPUs); err != nil {
-				logger.Error("could not build the default snapshot; calls will boot instead", "error", err)
+			defer startup.Done()
+			for _, rt := range append([]string{agentproto.RuntimeBinary}, available...) {
+				if _, err := snaps.EnsureRuntime(context.Background(), rt, registry.DefaultMemoryMiB, registry.DefaultVCPUs); err != nil {
+					logger.Error("could not build a runtime snapshot; its calls will boot instead", "runtime", rt, "error", err)
+				}
 			}
 		}()
 		return snaps, nil
@@ -124,7 +154,11 @@ func runServe(args []string) int {
 	var run runner.Runner
 	switch *runnerKind {
 	case "cold":
-		run = runner.NewColdRunner(base, *maxVMs, *queueWait)
+		c := runner.NewColdRunner(base, *maxVMs, *queueWait)
+		for rt, path := range images {
+			c.SetRootfs(rt, path)
+		}
+		run = c
 	case "snapshot", "warm":
 		snaps, err := openSnapshots()
 		if err != nil {
@@ -132,18 +166,28 @@ func runServe(args []string) int {
 			return 1
 		}
 		if *runnerKind == "snapshot" {
-			run = runner.NewSnapshotRunner(base, snaps, *maxVMs, *queueWait, logger)
+			s := runner.NewSnapshotRunner(base, snaps, *maxVMs, *queueWait, logger)
+			for rt, path := range images {
+				s.SetRootfs(rt, path)
+			}
+			run = s
 		} else {
-			run = runner.NewWarmRunner(base, snaps, pool.Config{
+			w := runner.NewWarmRunner(base, snaps, pool.Config{
 				MaxVMs: *maxVMs, KeepAlive: *keepAlive, QueueWait: *queueWait, Logger: logger,
 			}, logger)
+			for rt, path := range images {
+				w.SetRootfs(rt, path)
+			}
+			run = w
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "error: --runner must be warm, snapshot or cold, not %q\n", *runnerKind)
 		return 2
 	}
-	// The warm pool keeps VMs between calls: destroy them on the way out.
+	// The warm pool keeps VMs between calls, and snapshot builds run VMs too: wait for the
+	// start-up builds and destroy the pool's VMs on the way out.
 	closeRunner := func() {
+		startup.Wait()
 		if c, ok := run.(interface{ Close() error }); ok {
 			if err := c.Close(); err != nil {
 				logger.Warn("warm pool did not close cleanly", "error", err)
@@ -161,7 +205,7 @@ func runServe(args []string) int {
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
-	logger.Info("listening", "addr", *addr, "max_vms", *maxVMs, "runner", *runnerKind, "keep_alive", keepAlive.String(), "home", home)
+	logger.Info("listening", "addr", *addr, "max_vms", *maxVMs, "runner", *runnerKind, "keep_alive", keepAlive.String(), "runtimes", append([]string{agentproto.RuntimeBinary}, available...), "home", home)
 
 	select {
 	case err := <-errCh:

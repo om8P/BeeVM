@@ -3,11 +3,11 @@ BEEVM_HOME ?= $(HOME)/.beevm
 export BEEVM_HOME
 GO ?= /usr/local/go/bin/go
 
-.PHONY: help setup images kernel rootfs boot boot-test clean-images build examples test test-kvm test-s3 vet minio minio-up minio-down
+.PHONY: help setup images kernel rootfs rootfs-python rootfs-node boot boot-test clean-images build examples test test-kvm test-s3 vet minio minio-up minio-down
 
 help:
 	@echo "make setup        one-time install (Go, Firecracker, kernel, rootfs); needs sudo"
-	@echo "make images       (re)build kernel + rootfs only"
+	@echo "make images       (re)build kernel + all rootfs images (binary, python, node)"
 	@echo "make boot         boot a MicroVM with the shell script and get a shell (reboot -f to exit)"
 	@echo "make boot-test    boot with the shell script, check it worked, print boot time"
 	@echo "make build        build bin/beevmd (server) and bin/beevm (user CLI)"
@@ -23,11 +23,15 @@ help:
 setup:
 	bash scripts/setup-wsl.sh
 
-images: kernel rootfs
+images: kernel rootfs rootfs-python rootfs-node
 kernel:
 	bash guest/kernel/fetch-kernel.sh
 rootfs:
-	bash guest/rootfs/build-rootfs.sh
+	bash guest/rootfs/build-rootfs.sh binary
+rootfs-python:
+	bash guest/rootfs/build-rootfs.sh python
+rootfs-node:
+	bash guest/rootfs/build-rootfs.sh node
 
 boot:
 	bash scripts/boot-vm.sh

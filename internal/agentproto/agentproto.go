@@ -7,6 +7,8 @@
 //	PUT  /function  -> body is the raw function binary; replies UploadResponse
 //	POST /invoke    -> InvokeRequest in, InvokeResponse out
 //	POST /resume    -> ResumeRequest in, ResumeResponse out (after a snapshot restore)
+//	PUT  /package   -> body is a zip package (Python/Node.js); replies UploadResponse
+//	POST /load      -> LoadRequest in, LoadResponse out (start the runtime, import the code)
 package agentproto
 
 import (
@@ -23,6 +25,8 @@ const (
 	PathFunction = "/function"
 	PathInvoke   = "/invoke"
 	PathResume   = "/resume"
+	PathPackage  = "/package"
+	PathLoad     = "/load"
 )
 
 // FunctionPath is where the agent stores the uploaded function inside the guest. /run is a
@@ -80,6 +84,42 @@ type ResumeRequest struct {
 // ResumeResponse says how far the guest clock was moved.
 type ResumeResponse struct {
 	ClockAdjustedMS int64 `json:"clock_adjusted_ms"`
+}
+
+// Runtimes. A "binary" function is one executable started per call. "python" and "node"
+// functions are zip packages that a long-lived runtime shim imports once and then calls.
+const (
+	RuntimeBinary = "binary"
+	RuntimePython = "python"
+	RuntimeNode   = "node"
+)
+
+// CodeDir is where the agent unpacks a zip package inside the guest (tmpfs, like FunctionPath).
+const CodeDir = "/run/beevm/code"
+
+// Package limits. The package is unpacked into RAM inside a VM that may only have 128 MiB,
+// so the unpacked size is much smaller than the upload limit allows for binaries.
+const (
+	MaxUnpackedBytes  = 32 << 20
+	MaxPackageEntries = 2000
+
+	DefaultLoadTimeout = 30 * time.Second // starting the runtime + importing the code
+)
+
+// LoadRequest is the body of POST /load. It starts the runtime's shim if it is not running
+// and, when Handler is set, imports the package in CodeDir and looks up the handler.
+// An empty Handler only starts the interpreter (that is how runtime snapshots are built).
+type LoadRequest struct {
+	Runtime   string `json:"runtime"`              // RuntimePython or RuntimeNode
+	Handler   string `json:"handler,omitempty"`    // "module.function" (python) or "file.function" (node)
+	TimeoutMS int64  `json:"timeout_ms,omitempty"` // 0 means DefaultLoadTimeout
+}
+
+// LoadResponse is the result of a successful POST /load. A failing import is answered with
+// HTTP 422 and an ErrorResponse that holds the error (traceback or stack).
+type LoadResponse struct {
+	LoadMS int64  `json:"load_ms"`
+	Logs   string `json:"logs,omitempty"` // anything the module printed while importing
 }
 
 // ErrorResponse is the body of 4xx/5xx replies (problems with the request or the agent itself).
