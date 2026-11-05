@@ -4,27 +4,31 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/om8P/BeeVM/internal/agentproto"
+	"github.com/om8P/BeeVM/internal/pkg"
 	"github.com/om8P/BeeVM/internal/snapshot"
 	"github.com/om8P/BeeVM/internal/vmm"
 )
 
 // runInvoke starts a VM with the guest agent (a full boot, or with --restore a restore from the
-// base snapshot), uploads a function binary, runs it one or more times, then stops the VM and
-// cleans up.
+// runtime snapshot), uploads the function (binary or python/node package, which is then
+// imported), runs it one or more times, then stops the VM and cleans up.
 func runInvoke(args []string) int {
 	fs := flag.NewFlagSet("invoke", flag.ExitOnError)
-	code := fs.String("code", "", "path to the function binary (static Linux x86-64 executable)")
+	code := fs.String("code", "", "the function: a static Linux x86-64 binary, or a folder/.py/.js/.zip for python and node")
+	runtimeFlag := fs.String("runtime", "", "binary, python or node (default: detected from --code)")
+	handler := fs.String("handler", "", "python: module.function, node: file.function (default handler.handler / index.handler)")
 	payload := fs.String("payload", "{}", "JSON payload sent to the function")
 	repeat := fs.Int("repeat", 1, "how many times to invoke")
 	fnTimeout := fs.Duration("timeout", 10*time.Second, "time limit for each function call")
@@ -48,14 +52,17 @@ func runInvoke(args []string) int {
 		fmt.Fprintln(os.Stderr, "error: --repeat must be at least 1")
 		return 2
 	}
-	if _, err := os.Stat(*code); err != nil {
+	fn, err := openCode(*code, *runtimeFlag, *handler)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 2
 	}
+	defer fn.Close()
 
 	home := beevmHome()
 	cfg := vmConfig(home, snapshot.BootArgs, *vcpus, *mem)
 	cfg.SharedRootfs = true
+	cfg.RootfsPath = rootfsFor(home, fn.Runtime)
 
 	var vm *vmm.VM // set once the VM exists
 	defer func() {
@@ -107,13 +114,13 @@ func runInvoke(args []string) int {
 	startCtx, cancelStart := context.WithTimeout(sigCtx, *readyTimeout)
 	defer cancelStart()
 	if *restore {
-		snaps, err := snapshot.New(filepath.Join(home, "snapshots"), cfg, func(f string, a ...any) {
+		snaps, err := snapshotManager(home, func(f string, a ...any) {
 			fmt.Printf("== "+f+"\n", a...)
 		})
 		if err != nil {
 			return fail("%v", err)
 		}
-		snap, err := snaps.Ensure(startCtx, *mem, *vcpus)
+		snap, err := snaps.EnsureRuntime(startCtx, fn.Runtime, *mem, *vcpus)
 		if err != nil {
 			return fail("snapshot: %v", err)
 		}
@@ -159,11 +166,36 @@ func runInvoke(args []string) int {
 	upCtx, cancelUp := context.WithTimeout(sigCtx, 30*time.Second)
 	defer cancelUp()
 	t0 := time.Now()
-	up, err := vm.Agent().UploadFunctionFile(upCtx, *code)
+	var up agentproto.UploadResponse
+	if pkg.IsPackaged(fn.Runtime) {
+		up, err = vm.Agent().UploadPackageFile(upCtx, fn.Path)
+	} else {
+		up, err = vm.Agent().UploadFunctionFile(upCtx, fn.Path)
+	}
 	if err != nil {
 		return fail("upload: %v", err)
 	}
-	fmt.Printf("== uploaded %s (%d bytes, sha256 %s...) in %v\n", *code, up.Size, up.SHA256[:12], time.Since(t0).Round(time.Millisecond))
+	fmt.Printf("== uploaded %s (%s, %d bytes, sha256 %s...) in %v\n", *code, fn.Runtime, up.Size, up.SHA256[:12], time.Since(t0).Round(time.Millisecond))
+	if pkg.IsPackaged(fn.Runtime) {
+		// Start the interpreter and import the code (once; every call then reuses it).
+		t0 = time.Now()
+		ld, err := vm.Agent().Load(upCtx, fn.Runtime, fn.Handler, 0)
+		var le *vmm.LoadError
+		if errors.As(err, &le) {
+			stopTail()
+			fmt.Fprintf(os.Stderr, "error: %s does not load:\n%s\n", fn.Handler, le.Msg)
+			return 1
+		}
+		if err != nil {
+			return fail("load: %v", err)
+		}
+		fmt.Printf("== loaded %s in %v (runtime start + import; agent says %d ms)\n", fn.Handler, time.Since(t0).Round(time.Millisecond), ld.LoadMS)
+		for _, line := range strings.Split(strings.TrimRight(ld.Logs, "\n"), "\n") {
+			if line != "" {
+				fmt.Printf("   log: %s\n", line)
+			}
+		}
+	}
 
 	// 3. Invoke.
 	exit := 0

@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/om8P/BeeVM/internal/agentproto"
 	"github.com/om8P/BeeVM/internal/vmm"
 )
 
@@ -52,7 +53,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  boot     start one MicroVM, show its console, stop it and clean up")
 	fmt.Fprintln(os.Stderr, "  invoke   boot (or --restore) a VM, upload a function binary, run it (repeatedly), clean up")
 	fmt.Fprintln(os.Stderr, "  serve    run the HTTP API (deploy and invoke functions)")
-	fmt.Fprintln(os.Stderr, "  tenant   add | ls   (manage customers; prints a new API key on add)")
+	fmt.Fprintln(os.Stderr, "  tenant   add |snapshot build [--runtime R] | ls | rm <key> | rm --stale   (snapshots for fast restore)  (manage customers; prints a new API key on add)")
 	fmt.Fprintln(os.Stderr, "  key      add | ls | revoke   (manage API keys)")
 	fmt.Fprintln(os.Stderr, "  snapshot build | ls | rm <key> | rm --stale   (base snapshots for fast restore)")
 	fmt.Fprintln(os.Stderr, "  bench    coldstart   (measure boot vs snapshot restore, p50/p99)")
@@ -68,6 +69,15 @@ func vmConfig(home, bootArgs string, vcpus, mem int64) vmm.Config {
 		ExtraBootArgs:  bootArgs,
 		VCPUs:          vcpus,
 		MemMiB:         mem,
+	}
+}
+
+// runtimeImages are the root filesystem images of the python and node runtimes (built by
+// `make images`; binaries use images/rootfs.ext4 from vmConfig).
+func runtimeImages(home string) map[string]string {
+	return map[string]string{
+		agentproto.RuntimePython: filepath.Join(home, "images", "rootfs-python.ext4"),
+		agentproto.RuntimeNode:   filepath.Join(home, "images", "rootfs-node.ext4"),
 	}
 }
 

@@ -120,7 +120,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 
 func toAPIFunction(f registry.Function) apitypes.Function {
 	return apitypes.Function{
-		Name: f.Name, Runtime: f.Runtime, CodeSHA256: f.CodeSHA256, CodeSize: f.CodeSize,
+		Name: f.Name, Runtime: f.Runtime, Handler: f.Handler, CodeSHA256: f.CodeSHA256, CodeSize: f.CodeSize,
 		MemoryMiB: f.MemoryMiB, VCPUs: f.VCPUs, TimeoutMS: f.TimeoutMS,
 		CreatedAt: f.CreatedAt, UpdatedAt: f.UpdatedAt,
 	}

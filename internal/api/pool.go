@@ -64,10 +64,7 @@ func (s *Server) prewarm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	started, err := pw.Prewarm(r.Context(), runner.Request{
-		CodePath: codePath, MemoryMiB: f.MemoryMiB, VCPUs: f.VCPUs, TimeoutMS: f.TimeoutMS,
-		TenantID: tenant.ID, FunctionID: f.ID, CodeSHA256: f.CodeSHA256,
-	}, count)
+	started, err := pw.Prewarm(r.Context(), functionRequest(tenant.ID, f, codePath), count)
 	switch {
 	case errors.Is(err, runner.ErrBusy):
 		w.Header().Set("Retry-After", "1")

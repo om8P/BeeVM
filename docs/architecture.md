@@ -64,8 +64,8 @@ Project lives in `C:\Users\ommga\Desktop\ACC\BeeVM\` (currently holds only the c
 | 8 | **Network Provisioner** | One **network namespace per VM** containing a TAP with the *same* guest IP (so restored snapshots work unchanged); veth pair to host; NAT; default-deny egress between tenants | `vishvananda/netlink`, `vishvananda/netns`, **nftables** (`google/nftables`) |
 | 9 | **Isolation Provisioner** | Jailer (chroot + unique UID/GID per VM), **cgroups v2** (`cpu.max`, `memory.max`, `pids.max`) under `beevm/<tenant>/<vm>`, Firecracker seccomp filters | Firecracker **jailer**, `containerd/cgroups/v3` |
 | 10 | **Guest Agent** | Runs inside every VM; listens on vsock; receives `{code, payload}`; runs handler; returns result, stdout, duration | Go static binary `beevm-agent`, HTTP over `mdlayher/vsock` |
-| 11 | **Runtime shims** | Python: persistent process importing `handler.py` → `handler(event)`. Node: same with `index.js`. Binary: exec with JSON on stdin, JSON on stdout | Python 3.12, Node.js 20, small shim scripts |
-| 12 | **Guest images** | Kernel + 3 rootfs images: `base` (agent only, for binaries), `python`, `node` | Firecracker CI `vmlinux-6.1`, rootfs built from **Alpine** via Docker export → `mkfs.ext4` script |
+| 11 | **Runtime shims** | Python: persistent process importing `handler.py` → `handler(event)`. Node: same with `index.js`. Binary: exec with JSON on stdin, JSON on stdout | Python 3.14, Node.js 24 (Alpine 3.24 packages; changed from 3.12/20 on 2026-11-05), small shim scripts talking JSON lines on fd 3/4 |
+| 12 | **Guest images** | Kernel + 3 rootfs images: `base` (agent only, for binaries), `python`, `node` | Firecracker CI `vmlinux-6.1`, rootfs built from the **Alpine** minirootfs, packages via `apk.static --root` under fakeroot → `mkfs.ext4 -d` (no Docker, no sudo) |
 | 13 | **Observability** | Metrics: cold/warm latency histograms, restore time, pool size, VMs per node, memory per VM. Structured logs | `prometheus/client_golang`, Go `log/slog` (JSON) |
 | 14 | **CLI** `beevm` | `deploy`, `invoke`, `ls`, `rm`, `vms`, `logs`, `bench` | Go + `spf13/cobra` |
 | 15 | **Web Dashboard** *(optional module)* | Live VM grid (state colours), pool sizes, invoke button with timing, cold vs warm latency chart, density counter | **React + Vite + TypeScript**, **Recharts**, Tailwind; built to static files served by `beevmd` at `/ui` (or standalone) |
@@ -108,8 +108,8 @@ internal/isolation/    jailer config, cgroups v2
 internal/agentproto/   shared request/response types (host ↔ agent)
 internal/metrics/      Prometheus collectors
 guest/kernel/          kernel fetch script + config notes
-guest/rootfs/          Dockerfiles: base, python, node + build-rootfs.sh
-guest/shims/           python & node handler shims
+guest/rootfs/          build-rootfs.sh [binary|python|node] + init
+guest/shims/           python & node handler shims (shim.py, shim.js)
 examples/functions/    hello-python, hello-node, hello-go-binary, cpu-heavy, memory-hog
 web/                   (optional) React dashboard
 deploy/monitoring/     (optional) prometheus.yml, grafana dashboards

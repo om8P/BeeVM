@@ -57,7 +57,7 @@ fi
 
 # 5. Kernel + rootfs
 bash "$ROOT/guest/kernel/fetch-kernel.sh"
-bash "$ROOT/guest/rootfs/build-rootfs.sh"
+for rt in binary python node; do bash "$ROOT/guest/rootfs/build-rootfs.sh" "$rt"; done
 
 # 6. Summary
 echo

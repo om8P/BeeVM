@@ -71,7 +71,7 @@ Good reasons to refine: a test is flaky, code is hard to read, you don't underst
 
 ## M8: Python and Node.js runtimes, function snapshots
 - **Goal:** the languages from the plan, plus per-function snapshots.
-- **Do:** `guest/rootfs` images for Python 3.12 and Node.js 20 with shims, **runtime snapshot** (interpreter loaded) and **function snapshot** (user code imported), deploy of zip packages.
+- **Do:** `guest/rootfs` images for Python 3.14 and Node.js 24 with shims (was 3.12/20; changed 2026-11-05, not in Alpine 3.24, Node 20 end-of-life), **runtime snapshot** (interpreter loaded) and **function snapshot** (user code imported), deploy of zip packages.
 - **Done when:** `hello-python` and `hello-node` run correctly and their restore times are measured and compared with the static binary.
 - **You learn:** why snapshotting after loading code helps.
 - **Refine later:** package size limits, more example functions.

@@ -322,24 +322,37 @@ func consoleHasLine(path, marker string) (bool, error) {
 // Pause freezes the VM's vCPUs. A snapshot can only be taken of a paused VM.
 func (v *VM) Pause(ctx context.Context) error {
 	v.mu.Lock()
-	machine := v.machine
+	machine, started := v.machine, v.started
 	v.mu.Unlock()
-	if machine == nil {
-		return errors.New("vm not started")
+	switch {
+	case machine != nil:
+		return machine.PauseVM(ctx)
+	case started: // restored: no SDK machine, talk to Firecracker directly
+		api := newFCAPI(v.cfg.SocketPath())
+		defer api.close()
+		return api.patch(ctx, "/vm", map[string]string{"state": "Paused"})
 	}
-	return machine.PauseVM(ctx)
+	return errors.New("vm not started")
 }
 
 // CreateSnapshot writes the paused VM's memory (memPath) and its CPU and device state
-// (statePath). Both files must not exist yet.
+// (statePath). Both files must not exist yet. A restored VM can be snapshotted again (that is
+// how function snapshots are made from a runtime snapshot).
 func (v *VM) CreateSnapshot(ctx context.Context, memPath, statePath string) error {
 	v.mu.Lock()
-	machine := v.machine
+	machine, started := v.machine, v.started
 	v.mu.Unlock()
-	if machine == nil {
-		return errors.New("vm not started")
+	switch {
+	case machine != nil:
+		return machine.CreateSnapshot(ctx, memPath, statePath)
+	case started:
+		api := newFCAPI(v.cfg.SocketPath())
+		defer api.close()
+		return api.put(ctx, "/snapshot/create", map[string]string{
+			"snapshot_type": "Full", "snapshot_path": statePath, "mem_file_path": memPath,
+		})
 	}
-	return machine.CreateSnapshot(ctx, memPath, statePath)
+	return errors.New("vm not started")
 }
 
 // Stop asks the guest to shut down (Ctrl-Alt-Del) and waits until ctx ends; if the VM has

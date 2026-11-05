@@ -16,12 +16,15 @@ const (
 	HeaderFetchMS    = "X-BeeVM-Fetch-Ms"   // time spent fetching the code; 0 on a hit
 	HeaderStart      = "X-BeeVM-Start"      // how the VM started: "warm" (reused from the pool), "restore" (from a snapshot) or "boot"
 	HeaderUploadMS   = "X-BeeVM-Upload-Ms"  // time spent sending the code into the VM
+	HeaderSnapshot   = "X-BeeVM-Snapshot"   // for "restore": "function" (code already inside) or "runtime"
+	HeaderLoadMS     = "X-BeeVM-Load-Ms"    // python/node: time spent importing the code
 )
 
 // Function describes a deployed function.
 type Function struct {
 	Name       string    `json:"name"`
 	Runtime    string    `json:"runtime"`
+	Handler    string    `json:"handler,omitempty"`
 	CodeSHA256 string    `json:"code_sha256"`
 	CodeSize   int64     `json:"code_size"`
 	MemoryMiB  int64     `json:"memory_mib"`
@@ -31,11 +34,15 @@ type Function struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
-// FunctionConfig is the optional "config" part of a deploy. Zero fields mean "use the default".
+// FunctionConfig is the optional "config" part of a deploy. Zero fields mean "use the default":
+// runtime "binary", the runtime's default handler (python: handler.handler, node:
+// index.handler). Python and Node.js code is uploaded as a zip package.
 type FunctionConfig struct {
-	MemoryMiB int64 `json:"memory_mib,omitempty"`
-	VCPUs     int64 `json:"vcpus,omitempty"`
-	TimeoutMS int64 `json:"timeout_ms,omitempty"`
+	Runtime   string `json:"runtime,omitempty"`
+	Handler   string `json:"handler,omitempty"`
+	MemoryMiB int64  `json:"memory_mib,omitempty"`
+	VCPUs     int64  `json:"vcpus,omitempty"`
+	TimeoutMS int64  `json:"timeout_ms,omitempty"`
 }
 
 // FunctionList is the answer to GET /api/v1/functions.

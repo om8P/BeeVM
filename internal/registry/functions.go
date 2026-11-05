@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/om8P/BeeVM/internal/agentproto"
+	"github.com/om8P/BeeVM/internal/pkg"
 )
 
 // Limits for a function's settings. They match what the guest agent can enforce.
@@ -23,7 +26,8 @@ type Function struct {
 	ID         int64
 	TenantID   int64
 	Name       string
-	Runtime    string // "binary" for now
+	Runtime    string // "binary", "python" or "node"
+	Handler    string // python/node: "module.function" or "file.function"; empty for binaries
 	CodeSHA256 string
 	CodeSize   int64
 	MemoryMiB  int64
@@ -33,8 +37,11 @@ type Function struct {
 	UpdatedAt  time.Time
 }
 
-// Spec is what a deploy provides. Zero MemoryMiB, VCPUs or TimeoutMS mean "use the default".
+// Spec is what a deploy provides. Zero MemoryMiB, VCPUs or TimeoutMS mean "use the default";
+// an empty Runtime means "binary" and an empty Handler the runtime's default handler.
 type Spec struct {
+	Runtime    string
+	Handler    string
 	CodeSHA256 string
 	CodeSize   int64
 	MemoryMiB  int64
@@ -53,6 +60,24 @@ func (s Spec) withDefaults() (Spec, error) {
 	if s.TimeoutMS == 0 {
 		s.TimeoutMS = DefaultTimeoutMS
 	}
+	if s.Runtime == "" {
+		s.Runtime = agentproto.RuntimeBinary
+	}
+	if !pkg.ValidRuntime(s.Runtime) {
+		return s, fmt.Errorf("%w: runtime must be binary, python or node", ErrInvalidSpec)
+	}
+	if !pkg.IsPackaged(s.Runtime) {
+		if s.Handler != "" {
+			return s, fmt.Errorf("%w: binaries have no handler", ErrInvalidSpec)
+		}
+	} else {
+		if s.Handler == "" {
+			s.Handler = pkg.DefaultHandler(s.Runtime)
+		}
+		if err := pkg.ValidateHandler(s.Runtime, s.Handler); err != nil {
+			return s, fmt.Errorf("%w: %v", ErrInvalidSpec, err)
+		}
+	}
 	switch {
 	case s.MemoryMiB < MinMemoryMiB || s.MemoryMiB > MaxMemoryMiB:
 		return s, fmt.Errorf("%w: memory_mib must be %d-%d", ErrInvalidSpec, MinMemoryMiB, MaxMemoryMiB)
@@ -66,14 +91,14 @@ func (s Spec) withDefaults() (Spec, error) {
 	return s, nil
 }
 
-const functionColumns = "id, tenant_id, name, runtime, code_sha256, code_size, memory_mib, vcpus, timeout_ms, created_at, updated_at"
+const functionColumns = "id, tenant_id, name, runtime, handler, code_sha256, code_size, memory_mib, vcpus, timeout_ms, created_at, updated_at"
 
 type scanner interface{ Scan(dest ...any) error }
 
 func scanFunction(s scanner) (Function, error) {
 	var f Function
 	var created, updated int64
-	err := s.Scan(&f.ID, &f.TenantID, &f.Name, &f.Runtime, &f.CodeSHA256, &f.CodeSize,
+	err := s.Scan(&f.ID, &f.TenantID, &f.Name, &f.Runtime, &f.Handler, &f.CodeSHA256, &f.CodeSize,
 		&f.MemoryMiB, &f.VCPUs, &f.TimeoutMS, &created, &updated)
 	f.CreatedAt, f.UpdatedAt = time.Unix(created, 0), time.Unix(updated, 0)
 	return f, err
@@ -102,15 +127,15 @@ func (r *Registry) PutFunction(tenantID int64, name string, spec Spec) (f Functi
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		created = true
-		_, err = tx.Exec(`INSERT INTO functions(tenant_id, name, runtime, code_sha256, code_size, memory_mib, vcpus, timeout_ms, created_at, updated_at)
-			VALUES(?, ?, 'binary', ?, ?, ?, ?, ?, ?, ?)`,
-			tenantID, name, spec.CodeSHA256, spec.CodeSize, spec.MemoryMiB, spec.VCPUs, spec.TimeoutMS, now, now)
+		_, err = tx.Exec(`INSERT INTO functions(tenant_id, name, runtime, handler, code_sha256, code_size, memory_mib, vcpus, timeout_ms, created_at, updated_at)
+			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			tenantID, name, spec.Runtime, spec.Handler, spec.CodeSHA256, spec.CodeSize, spec.MemoryMiB, spec.VCPUs, spec.TimeoutMS, now, now)
 	case err != nil:
 		return Function{}, false, "", err
 	default:
 		oldSHA = existing.CodeSHA256
-		_, err = tx.Exec(`UPDATE functions SET code_sha256 = ?, code_size = ?, memory_mib = ?, vcpus = ?, timeout_ms = ?, updated_at = ?
-			WHERE id = ?`, spec.CodeSHA256, spec.CodeSize, spec.MemoryMiB, spec.VCPUs, spec.TimeoutMS, now, existing.ID)
+		_, err = tx.Exec(`UPDATE functions SET runtime = ?, handler = ?, code_sha256 = ?, code_size = ?, memory_mib = ?, vcpus = ?, timeout_ms = ?, updated_at = ?
+			WHERE id = ?`, spec.Runtime, spec.Handler, spec.CodeSHA256, spec.CodeSize, spec.MemoryMiB, spec.VCPUs, spec.TimeoutMS, now, existing.ID)
 	}
 	if err != nil {
 		return Function{}, false, "", err
@@ -169,4 +194,24 @@ func (r *Registry) CodeInUse(sha string) (bool, error) {
 	var n int
 	err := r.db.QueryRow("SELECT COUNT(*) FROM functions WHERE code_sha256 = ?", sha).Scan(&n)
 	return n > 0, err
+}
+
+// FunctionCodes returns every function's ID and code hash, across all tenants. The server
+// uses it to delete snapshots of functions that no longer exist (or changed their code).
+func (r *Registry) FunctionCodes() (map[int64]string, error) {
+	rows, err := r.db.Query("SELECT id, code_sha256 FROM functions")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]string{}
+	for rows.Next() {
+		var id int64
+		var sha string
+		if err := rows.Scan(&id, &sha); err != nil {
+			return nil, err
+		}
+		out[id] = sha
+	}
+	return out, rows.Err()
 }

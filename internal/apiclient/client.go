@@ -183,6 +183,8 @@ type InvokeResult struct {
 	FetchMS    int64  // time the server spent fetching the code from the artifact store
 	StartKind  string // "warm", "restore" or "boot"
 	UploadMS   int64  // time spent sending the code into the VM
+	Snapshot   string // for "restore": "function" (code was already inside) or "runtime"
+	LoadMS     int64  // python/node: time spent importing the code
 }
 
 // Invoke runs a function. payload must be valid JSON (nil or empty means no input). A function
@@ -203,5 +205,6 @@ func (c *Client) Invoke(ctx context.Context, name string, payload []byte) (Invok
 		BootMS: ms(apitypes.HeaderBootMS), FunctionMS: ms(apitypes.HeaderFunctionMS), TotalMS: ms(apitypes.HeaderTotalMS),
 		CodeCache: resp.Header.Get(apitypes.HeaderCodeCache), FetchMS: ms(apitypes.HeaderFetchMS),
 		StartKind: resp.Header.Get(apitypes.HeaderStart), UploadMS: ms(apitypes.HeaderUploadMS),
+		Snapshot: resp.Header.Get(apitypes.HeaderSnapshot), LoadMS: ms(apitypes.HeaderLoadMS),
 	}, nil
 }

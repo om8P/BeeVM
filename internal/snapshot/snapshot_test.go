@@ -23,7 +23,8 @@ func newTestManager(t *testing.T) (*Manager, *atomic.Int32) {
 		KernelPath:     filepath.Join(img, "vmlinux"),
 		RootfsPath:     filepath.Join(img, "rootfs.ext4"),
 	}
-	for _, p := range []string{base.FirecrackerBin, base.KernelPath, base.RootfsPath} {
+	python := filepath.Join(img, "rootfs-python.ext4")
+	for _, p := range []string{base.FirecrackerBin, base.KernelPath, base.RootfsPath, python} {
 		if err := os.WriteFile(p, []byte("content of "+filepath.Base(p)), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -33,9 +34,11 @@ func newTestManager(t *testing.T) (*Manager, *atomic.Int32) {
 		t.Fatal(err)
 	}
 	m.fcVersion = func() (string, error) { return "Firecracker v1.17.0", nil }
+	m.SetRootfs("python", python)
 	builds := &atomic.Int32{}
-	m.build = func(ctx context.Context, cfg vmm.Config, dir string) error {
+	m.build = func(ctx context.Context, job buildJob, dir string) error {
 		builds.Add(1)
+		cfg := job.cfg
 		if !cfg.SharedRootfs || cfg.ExtraBootArgs != BootArgs {
 			return errors.New("snapshot VMs must use the shared rootfs and agent mode")
 		}
@@ -133,7 +136,7 @@ func TestParallelEnsureSharesOneBuild(t *testing.T) {
 
 func TestFailedBuildLeavesNothing(t *testing.T) {
 	m, _ := newTestManager(t)
-	m.build = func(ctx context.Context, cfg vmm.Config, dir string) error {
+	m.build = func(ctx context.Context, job buildJob, dir string) error {
 		_ = os.WriteFile(filepath.Join(dir, "mem"), []byte("half"), 0o644)
 		return errors.New("vm did not start")
 	}
