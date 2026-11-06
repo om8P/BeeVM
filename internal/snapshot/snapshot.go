@@ -178,6 +178,8 @@ type Manager struct {
 	base   vmm.Config // FirecrackerBin, KernelPath, RootfsPath (binary); memory and vCPUs vary
 	settle time.Duration
 	logf   func(format string, args ...any)
+	// observer (optional) is told about every finished build; set it before any build starts.
+	observer func(kind string, d time.Duration, err error)
 
 	build     buildFunc              // replaced in unit tests
 	fcVersion func() (string, error) // replaced in unit tests
@@ -234,6 +236,11 @@ func New(dir string, base vmm.Config, logf func(string, ...any)) (*Manager, erro
 // default is DefaultSettle). The settle time is not part of the key, so use a separate
 // folder for snapshots built with a different value.
 func (m *Manager) SetSettle(d time.Duration) { m.settle = d }
+
+// SetObserver sets a function that is told about every finished build: its kind (KindRuntime
+// or KindFunction), how long it took and whether it failed. Used for metrics. Call it before
+// any build starts.
+func (m *Manager) SetObserver(fn func(kind string, d time.Duration, err error)) { m.observer = fn }
 
 // SetRootfs sets the root filesystem image of a runtime ("python", "node"; "binary" is the
 // base config's RootfsPath).
@@ -471,7 +478,7 @@ func (m *Manager) load(key string) (Snapshot, error) {
 }
 
 // create builds a snapshot in a temporary folder and renames it into place.
-func (m *Manager) create(ctx context.Context, meta Meta, job buildJob) (Snapshot, error) {
+func (m *Manager) create(ctx context.Context, meta Meta, job buildJob) (_ Snapshot, err error) {
 	key := meta.Key
 	if s, err := m.load(key); err == nil {
 		return s, nil // finished just before we got here
@@ -488,6 +495,9 @@ func (m *Manager) create(ctx context.Context, meta Meta, job buildJob) (Snapshot
 	}
 	m.logf("building snapshot %s (%s, %d MiB, %d vCPU)", key, what, job.cfg.MemMiB, job.cfg.VCPUs)
 	t0 := time.Now()
+	if m.observer != nil {
+		defer func() { m.observer(meta.Kind, time.Since(t0), err) }()
+	}
 	if err := m.build(ctx, job, tmp); err != nil {
 		return Snapshot{}, fmt.Errorf("build snapshot: %w", err)
 	}

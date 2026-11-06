@@ -16,7 +16,7 @@ Details of each milestone: `docs/milestones.md`.
 | 7 | Warm pool | Done (warm call p50 1.6 ms, p99 5.0 ms in the server; restore + first call 88 ms) |
 | 8 | Python and Node.js runtimes, function snapshots | Done (Python 3.14 / Node 24; cold start from a function snapshot p50 58 ms Python, 85 ms Node, 73 ms binary) |
 | 9 | Isolation and networking | Done (6/6 attacks contained, `make test-isolation`; jailer + network cost +3.8 ms on VM ready p50; guest hardening +7 ms on the first call after a restore) |
-| 10 | Observability (optional module) | Not started |
+| 10 | Observability (optional module) | Done (`/metrics` with latency histograms per start kind and snapshot tier, VMs per state, memory per VM as PSS; `make monitoring` = Prometheus + Grafana dashboard without Docker; `beevmd bench load`) |
 | 11 | Web dashboard (optional module) | Not started |
 | 12 | Benchmarks and density | Not started |
 | 13 | Cloud run, report and demo | Not started |
@@ -247,3 +247,25 @@ Status values: Not started · In progress · Done · Done, needs refinement (say
 - **Learned:** a NAT rule with the "proto specified" flag and no port range maps ports to 0 (looked like "connection refused"); killing a fork bomb needs freeze-then-kill, and signalling zombies "succeeds"; the guest's OOM killer acts before a host `memory.max` near the guest size; RLIMIT_NPROC counts threads; under sudo `HOME` is `/root`; a netns belongs to a thread (lock and discard it in Go). The Bash tool still mangles `\n` and `\\t` in heredocs: write edit scripts with the Write tool.
 - **Refine later:** per-tenant VM quotas, test `--egress nat`, look into the jailer's spawn time (it copies the 3.6 MB Firecracker binary into every jail), seccomp inside the guest, return 502 instead of 500 when a function's VM is killed by its host limit.
 - **Next:** milestone 12 (benchmarks and density) per the must-do order, or milestone 10/11 (observability, dashboard).
+
+### 2026-11-06: Milestone 10 (observability)
+- **Plan:** `C:\Users\ommga\.claude\plans\read-md-files-and-sequential-biscuit.md`. Agreed with the user: Prometheus + Grafana as **pinned binaries, no Docker** (`make monitoring`; Compose profile added but untested), load from a **small Go command** (`beevmd bench load`; k6 stays in M12). Full write-up: `developer-guide/guide.md` Part 13.
+- **`internal/metrics`** (new, `prometheus/client_golang` v1.25.0, own registry): `beevm_invocations_total{tenant,function,runtime,start,status}`; histograms `beevm_invoke_duration_seconds{start,runtime}` (measured in the middleware, µs precision), `beevm_vm_ready_seconds{start,snapshot}` (the cold start), `upload`, `load{runtime}`, `function{runtime}`; `code_fetches_total`, `vm_recycled_total{reason}`, `snapshot_builds_total` / `snapshot_build_seconds`. Buckets 0.5 ms ... 5 s, fine around 1 ms and 50 ms. `PoolCollector` reads at scrape time: `beevm_vms{state}`, `beevm_vms_max`, `beevm_vm_memory_{rss,pss}_bytes{state}` + `beevm_vm_memory_measured_vms` (from `/proc/<pid>/smaps_rollup` of each Firecracker process), `beevm_node_memory_{total,available}_bytes`. Known series are created at 0 at start (otherwise `rate`/`increase` lose a series' first observations: found in the live run, cold starts were missing).
+- **Hooks (additive, optional):** `pool.Config.OnRecycle` + `pool.RecycleReason` labels, `pool.VMInfo.PID` via `pool.PIDer`, `runner.warmVM.PID()`, `snapshot.Manager.SetObserver`, `api.Deps.Metrics` (nil = off). Only deployed functions become labels (a 404 name from the URL is not counted).
+- **API/logs:** `GET /metrics` outside the key group; request lines add `request_id`, `function`, `runtime`, `snapshot`, `boot_ms`, `upload_ms`, `load_ms`, `function_ms`. `serve --metrics` (default on), `--log-level`, `--log-format json|text`. Fixed the garbled `tenant` line in `beevmd` usage.
+- **`beevmd bench load`**: open loop (timer, round-robin over `--fn`, at most `--concurrency` in flight, busy ticks counted as skipped), progress every 5 s, table per start kind, `--out` writes `load-<time>.md`.
+- **Optional module:** `scripts/monitoring.sh` + `make monitoring` (Prometheus 3.15.1, Grafana 13.3.0, checksums in `scripts/common.sh`, data in `~/.beevm/monitoring`), `deploy/monitoring/` (prometheus.yml scraping every 1 s, Grafana provisioning, dashboard `beevm.json`: calls/s by start, warm ratio, failures, latency p50/p99 with 50 ms line, cold-start bar gauge per snapshot tier, VMs by state vs max, PSS/RSS per VM, node memory, recycles, calls per function, snapshot builds). Compose profile `monitoring` (`make monitoring-up`). The shared `download` helper got connect/stall timeouts (the first download hung).
+- **Verified:** unit tests in all packages (`-race` for metrics/api/pool/snapshot/runner/beevmd), `go vet` (also `-tags kvm`), gofmt; `make test-kvm` **300 passing** (new `TestE2EMetrics`: idle VM RSS 30.6 MiB, PSS 20.8 MiB). Live: Prometheus target up, Grafana provisioned the dashboard, three load phases watched live (below), clean shutdown (no beevmd, firecracker, prometheus or grafana process, no VM folder, no ERROR log lines). Swappable: no Go code refers to `deploy/monitoring` or the script.
+- **Live run** (WSL2, `--max-vms 6`, `hello` + `hello-python` + `hello-node`; raw: `bench/results/m10/`):
+
+  | Phase | Calls | Caller round trip p50 / p99 (ms) | Server-side (Prometheus) |
+  |---|---|---|---|
+  | keep-alive 60 s, 20/s for 2 min | 2,400 ok (3 restores) | warm 2.1 / 18.0 | warm p50 1.7 ms, 3 VMs |
+  | keep-alive 2 s, 1/s for 1 min | 60 ok, all cold (function snapshot) | 81.3 / 261 | **VM ready p50 45.7, p99 ~85** |
+  | 20/s for 1 min | 1,200 ok, all warm | 2.1 / 9.1 | warm p50 1.8 ms |
+  | prewarm 6 VMs of `hello` | | | **PSS 6.2 MiB vs RSS 22.1 MiB per VM** |
+
+- **Learned:** pre-create known label combinations; rare events need range-based panels (`increase(...[$__range])`), not per-second rates; PSS is the honest memory per VM (VMs of one function share one snapshot's pages, different functions share almost nothing: 48 vs 50 MiB); Grafana's file watcher does not see edits from the Windows side (restart `make monitoring`); a background `&` job ignores SIGINT, so test the stop path with SIGTERM; `pkill -f`/`pgrep -f` inside `bash -c` match their own command line.
+- **Not done / not verified:** memory reading for jailed VMs (needs `sudo`, not run; root can read every `smaps_rollup`), the Compose profile (no Docker), prewarmed VMs are not in `beevm_vm_ready_seconds` (documented), a new function's first call is missing from its rate.
+- **Refine later:** prewarm cold starts in the ready histogram (a runner-side hook), exemplars/trace ids, an alert rule for p99 > 50 ms, Grafana panels per tenant.
+- **Next:** milestone 12 (benchmarks and density), using `bench load` and the PSS metrics; or M11 (web dashboard).

@@ -1820,6 +1820,108 @@ make test-isolation   # root: jailed boot + snapshot + 2 parallel restores (UID,
 | A function that kills its own VM (host OOM) gets 500 | It is the VM that died, not the function; the pool replaces the VM. Could become 502 later |
 | Not done | per-tenant VM quotas (LRU still works across tenants), `--egress nat` is built but not tested yet, seccomp inside the guest, conntrack flush on slot reuse (not needed: rules are stateless) |
 
+## Part 13: Milestone 10, observability
+
+**Goal:** metrics you can graph. Until now the only views into a running server were one log line per request and `beevm vms`. Milestone 10 adds Prometheus metrics at `GET /metrics`, richer JSON logs, an optional Prometheus + Grafana setup with a ready-made dashboard, and a load generator to drive it. **Done when** Grafana shows live latency and density during a load run.
+
+### 13.1 Prometheus in five ideas
+
+1. **Pull, not push.** beevmd only answers `GET /metrics` with a plain-text list of numbers. Prometheus fetches ("scrapes") it every second (`deploy/monitoring/prometheus.yml`) and stores each number as a time series. beevmd does not know Prometheus exists.
+2. **Counter, gauge, histogram.** A *counter* only goes up (`beevm_invocations_total`); Prometheus turns it into a rate with `rate(...[15s])`. A *gauge* goes up and down (`beevm_vms`). A *histogram* counts observations in buckets (`le="0.001"`, `le="0.002"`, ...: "how many calls took at most 1 ms, 2 ms, ..."); `histogram_quantile(0.99, ...)` estimates the p99 from them. The bucket bounds decide the precision, so ours are fine around the ~1 ms warm path and the 50 ms target: 0.5, 1, 2, 5, 10, 20, 30, 40, 50, 60, 75, 100, 150, 200, 300, 500 ms, 1, 2, 5 s.
+3. **Labels and cardinality.** Every distinct set of label values is a separate series. Labels therefore only take values from small known sets (start kind, runtime, state, reason) or from *deployed* functions. A function name typed into the URL never becomes a label: a 404 is not counted, otherwise anyone could create unlimited series.
+4. **Collect at scrape time.** VM counts and memory are not kept up to date on every change. A custom *collector* (`metrics.PoolCollector`) asks the pool for its VM list whenever Prometheus scrapes and reads each Firecracker process's memory from `/proc` right then. No pool code had to change for the counts.
+5. **Own registry.** `metrics.New()` makes its own registry instead of Prometheus' global one, so tests (and two servers in one test binary) never see each other's numbers.
+
+### 13.2 What gets measured
+
+| Metric | Type, labels | Where it comes from |
+|---|---|---|
+| `beevm_invocations_total` | counter; `tenant, function, runtime, start` (warm/restore/boot/none), `status` (ok, function_error, busy, bad_request, client_closed, error) | the API's request middleware, once per `/invoke` of a deployed function |
+| `beevm_invoke_duration_seconds` | histogram; `start, runtime` | the whole request inside the server, measured by the middleware (microsecond precision; `X-BeeVM-Total-Ms` is whole milliseconds, too coarse for warm calls) |
+| `beevm_vm_ready_seconds` | histogram; `start, snapshot` (function/runtime) | `Result.BootMS`: **the cold start**, per tier |
+| `beevm_upload_seconds`, `beevm_load_seconds{runtime}`, `beevm_function_seconds{runtime}` | histograms | the runner's `Result` |
+| `beevm_code_fetches_total{cache}` | counter | code cache hit/miss (M5) |
+| `beevm_vm_recycled_total{reason}` | counter; keep_alive, evicted, unhealthy, drained, closing, exited | new optional hook `pool.Config.OnRecycle` |
+| `beevm_snapshot_builds_total{kind,result}`, `beevm_snapshot_build_seconds{kind}` | counter, histogram | new optional hook `snapshot.Manager.SetObserver` |
+| `beevm_vms{state}`, `beevm_vms_max` | gauges | `PoolCollector`: the pool's VM list, `--max-vms` |
+| `beevm_vm_memory_rss_bytes{state}`, `beevm_vm_memory_pss_bytes{state}`, `beevm_vm_memory_measured_vms{state}` | gauges (sums) | `/proc/<pid>/smaps_rollup` of each VM's Firecracker process (new `pool.VMInfo.PID`, through an optional `pool.PIDer` interface) |
+| `beevm_node_memory_total_bytes`, `beevm_node_memory_available_bytes` | gauges | `/proc/meminfo` |
+| `go_*`, `process_*` | standard | beevmd itself |
+
+**RSS or PSS for "memory per VM"?** RSS (resident set size) counts every page a process has in RAM, including pages it shares with other processes. Restored VMs map the *same* snapshot memory file, and pages they only read are shared through the page cache, so adding up RSS counts those pages once per VM and overstates the total. PSS (proportional set size) divides each shared page by the number of processes sharing it, so PSS values add up to the real total. The dashboard shows both; the gap between them is memory the VMs share, which is what makes high density possible (M12 measures it at scale).
+
+### 13.3 How it is wired (and what stayed untouched)
+
+- `internal/metrics` (new): `metrics.go` (definitions, `ObserveInvoke`, `ObserveRecycle`, `ObserveSnapshotBuild`; a nil `*Metrics` records nothing), `collector.go` (`PoolCollector`), `proc.go` (`smaps_rollup` and `meminfo` parsers). It imports `pool` only for `VMInfo`; it does not import the runner, so it carries its own small `Invocation` struct.
+- `internal/api`: `Deps.Metrics` (optional). The existing logging middleware is the one place that both writes the request log line and records the call, because only there are the final HTTP status and the runner's result both known. `/metrics` is outside the API-key group.
+- Hooks are additive and optional: `pool.Config.OnRecycle` (called with the pool's lock held: it only increments a counter), `pool.VMInfo.PID`, `snapshot.Manager.SetObserver`, `runner.warmVM.PID()`. With metrics off nothing changes.
+- **Logs:** every request line now has `request_id` (chi's `RequestID` middleware), and for calls `function`, `runtime`, `start`, `snapshot`, `boot_ms`, `upload_ms`, `load_ms`, `function_ms`. `--log-format text` for reading, `--log-level debug` for more.
+- **Security:** `/metrics` has no API key and shows tenant and function names. It is on the API's address, which is `127.0.0.1` by default; on a public address put it behind a firewall (or use `--metrics=false`).
+
+### 13.4 Use it
+
+```bash
+make build examples
+./bin/beevmd serve                                    # terminal 1 (metrics on by default)
+make monitoring                                       # terminal 2: Prometheus :9090 + Grafana :3000 (first run downloads ~600 MB)
+# terminal 3:
+export BEEVM_API_KEY=...                              # from: ./bin/beevmd tenant add demo
+./bin/beevm deploy hello bin/functions/hello-go-binary
+./bin/beevm deploy hello-python examples/functions/hello-python
+./bin/beevm deploy hello-node examples/functions/hello-node
+./bin/beevmd bench load --fn hello,hello-python,hello-node --rate 20 --duration 2m --out bench/results
+curl -s 127.0.0.1:8080/metrics | grep ^beevm_      # the raw numbers
+```
+
+Open **http://localhost:3000** in the Windows browser (WSL forwards localhost): the home page is the **BeeVM** dashboard (anonymous viewing; `admin` / `admin` to edit). Rows: calls per second by start kind, warm hit ratio, failures by status; p50/p99 latency by start kind on a log scale with a red 50 ms line; VM-ready p50/p99 per snapshot tier; VMs by state (stacked) against `--max-vms`; memory per VM (PSS vs RSS), node memory; recycles by reason; calls per function; snapshot builds.
+
+`make monitoring` downloads checksum-verified release tarballs (Prometheus 3.15.1, Grafana 13.3.0) into `~/.beevm/monitoring`, keeps their data there, and runs both in the foreground; Ctrl-C stops both. No Docker. `make monitoring-up` is the same with Docker Compose (profile `monitoring`, host networking), written but not tested here.
+
+`beevmd bench load` is *open loop*: a timer starts a call every 1/rate seconds, round-robin over the functions, whether earlier calls finished or not, up to `--concurrency` at once; a tick with every slot busy is counted as *skipped*, not queued. So an overloaded server shows up as latency and skips instead of silently lowering the load (a closed loop, "next call when the last one returns", hides exactly that). It prints a progress line every 5 s and, at the end, the round trip per start kind and the status counts.
+
+### 13.5 Removing the optional part
+
+Delete `deploy/monitoring/`, `scripts/monitoring.sh` and the `monitoring*` block at the end of the Makefile: `make build` and every test still pass (no Go code refers to them). `/metrics` itself is core and stays.
+
+### 13.6 The live run (2026-11-06, WSL2, `--max-vms 6`)
+
+Three functions (`hello` binary, `hello-python`, `hello-node`), `make monitoring` and `bench load`, with Grafana open the whole time:
+
+| Phase | What the load did | Caller's round trip p50 / p90 / p99 | What Grafana showed |
+|---|---|---|---|
+| A: `--keep-alive 60s`, 20 calls/s for 2 min | 2,400 calls, all 200; 3 restores then only warm | warm 2.1 / 3.1 / 18.0 ms; restore ~122 ms | ~20 calls/s, warm ratio 100 %, warm p50 1.7 ms inside the server, 3 VMs (one per function) |
+| B: `--keep-alive 2s`, 1 call/s for 1 min | 60 calls, every one a cold start from a function snapshot | 81.3 / 107.8 / 261 ms | VM ready p50 **45.7 ms**, p99 ~85 ms (bucket estimate); 57 VMs recycled for keep-alive |
+| C: 20 calls/s for 1 min | 1,200 calls, all warm | 2.1 / 3.1 / 9.1 ms | VMs back to 3, warm p50 1.8 ms |
+| Prewarm `hello -n 6` | 6 idle VMs of one function | | **PSS 6.2 MiB per VM vs RSS 22.1 MiB**: the six VMs together cost ~37 MiB |
+
+The memory numbers show why PSS matters. Three VMs of *different* functions restored from three different function snapshots share almost nothing: PSS 48 MiB vs RSS 50 MiB per VM. Six VMs of the *same* function share the pages of one snapshot file, so each one really costs about a quarter of what RSS says. M12 measures how far that goes.
+
+### 13.7 Problems we hit
+
+| Problem | Cause and fix |
+|---|---|
+| The cold-start panel stayed empty although restores had happened | Prometheus computes `rate()` and `increase()` from the difference between scrapes. A histogram series that first appears already holding a value has no earlier 0 to compare with, so its first observations disappear. Rare events (cold starts) were hit hardest. Fix: `metrics.New()` creates every known series at 0 (start kind x runtime, snapshot tiers, cache hit/miss, build kinds). Series with tenant and function labels cannot be pre-created; a new function's very first call is missing from its rate (the total counter is right) |
+| Cold starts are too rare for a per-second graph | Panel changed to a bar gauge over the whole selected time range (`increase(...[$__range])`) |
+| Prewarmed VMs are not in `beevm_vm_ready_seconds` | They are created by `prewarm`, not by a call, and their first call counts as warm. Documented; `bench coldstart` remains the source of cold-start numbers for the report |
+| Grafana did not pick up an edited dashboard file | Its file watcher does not see changes made on the Windows side of `/mnt/c`. Restart `make monitoring` after editing the JSON (or edit in the Grafana UI and export) |
+| The first Prometheus download hung forever | A stalled connection; `curl` had no timeouts. The shared `download` helper now fails after 20 s without a connection or a minute under 1 KB/s |
+| Stopping `make monitoring` printed an error | The exit trap and the "one of them died" path both ran. Now Ctrl-C stops both quietly; only a real crash prints the error. Grafana takes a few seconds to stop |
+| Grafana refresh "2s" became 5 s | Grafana's minimum refresh interval is 5 s by default; the dashboard now says 5 s |
+
+### 13.8 Tests
+
+```bash
+make test       # new: metrics (status classes, every observation, series pre-created at 0, nil-safe,
+                # pool collector with a fake /proc, smaps_rollup and meminfo parsers), api (/metrics counts
+                # ok/warm/502/503 and ignores unknown names, needs no key, 404 when off; log line fields),
+                # pool (OnRecycle for every reason, PID in Stats), snapshot (observer on success and failure),
+                # bench load (rate, round-robin, concurrency limit and skips, Ctrl-C)
+make test-kvm   # 300 passing, new TestE2EMetrics: restore + warm counted, 1 idle VM, PSS > 0 and <= RSS
+                # (idle VM: RSS 30.6 MiB, PSS 20.8 MiB), node memory, pool close counted, nothing left
+```
+
+Not checked: reading memory of jailed VMs (`sudo ./bin/beevmd serve --isolation jailer`; root may read any process's `smaps_rollup`, so it should work), and the Docker Compose profile (no Docker here).
+
 ---
 
 ## Appendix A: command cheat sheet
@@ -1851,6 +1953,10 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 | `./bin/beevm ls` / `rm <name>` | list or delete your functions |
 | `./bin/beevm prewarm <name> [-n N]` | milestone 7: start N idle VMs so the next calls are warm |
 | `./bin/beevm vms` | milestone 7: list your VMs in the warm pool and their states |
+| `./bin/beevmd serve … [--metrics=false] [--log-level L] [--log-format json\|text]` | milestone 10: metrics at `GET /metrics` (on by default), log options |
+| `./bin/beevmd bench load --fn A[,B…] [--rate 20] [--duration 1m] [--concurrency 8] [--out DIR]` | milestone 10: send calls to a running server at a fixed rate (needs `BEEVM_API_KEY`) |
+| `make monitoring` / `make monitoring-up` / `make monitoring-down` | milestone 10 (optional): Prometheus :9090 + Grafana :3000 (dashboard "BeeVM"), pinned binaries or Docker Compose |
+| `curl -s 127.0.0.1:8080/metrics \| grep ^beevm_` | milestone 10: the raw metrics |
 | `make minio` / `make minio-up` / `make minio-down` | milestone 5: local S3 server (built from source) or via Docker Compose |
 | `set -a; . deploy/minio.env; set +a` | load the S3 settings and dev credentials into this terminal |
 | `make test` / `make test-kvm` / `make test-s3` / `make vet` | Go tests and checks (`test-s3` needs MinIO running) |
@@ -1877,6 +1983,9 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 | aws-sdk-go-v2 / service/s3 | v1.47.4 / v1.114.5 | `go.mod` |
 | gofakes3 (tests only) | v1.2.0 | `go.mod` |
 | MinIO (built from source) | pseudo-version `v0.0.0-20260212201848-7aac2a2c5b7c` | `scripts/common.sh` |
+| prometheus/client_golang | v1.25.0 | `go.mod` |
+| Prometheus (optional) | 3.15.1 (3.16.0 was one day old) | `scripts/common.sh`, `deploy/docker-compose.yml` |
+| Grafana OSS (optional) | 13.3.0 | `scripts/common.sh`, `deploy/docker-compose.yml` |
 | Guest agent | 0.1.0 | `cmd/beevm-agent/main.go` |
 | Host | Windows 11, WSL2 Ubuntu 24.04.3, WSL kernel 6.6.87 | — |
 
@@ -1927,6 +2036,10 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 | **Cold start from a function snapshot, first response (p50 / p99 of 50)** | **binary 73 / 90, Python 58 / 74, Node 85 / 125 ms** | 8 |
 | Cold start from the runtime snapshot + upload + import (p50 / p99 of 50) | binary 88 / 125, Python 87 / 105, Node 150 / 173 ms | 8 |
 | Warm call inside the server (p50, binary / Python / Node) | 1.5 / 0.4 / 0.7 ms | 8 |
+| Load run, 20 calls/s over 3 functions, caller's round trip (warm p50 / p99) | 2.1 / 9.1-18.0 ms | 10 |
+| Cold start from a function snapshot under load, VM ready p50 / p99 (Prometheus) | 45.7 / ~85 ms | 10 |
+| Memory per idle VM, 6 VMs of one function: PSS / RSS | 6.2 / 22.1 MiB | 10 |
+| Memory per idle VM, 3 VMs of different functions: PSS / RSS | 48 / 50 MiB | 10 |
 
 ## Appendix D: general troubleshooting
 
@@ -1945,6 +2058,7 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 13. **Benchmark tails (p99) differ a lot between identical runs:** that is host noise under nested virtualization. Compare runs made in the same session, and repeat a run before trusting a difference.
 14. **Calls are never `warm` (always `restore`):** check the server runs with `--runner warm` (the default), that calls come faster than `--keep-alive`, and that nothing redeployed the function in between (a redeploy throws its VMs away). Timeouts and agent errors also replace the VM on purpose. `beevm vms` shows what the pool holds.
 15. **The first `go vet` / `go test` takes minutes:** Go is compiling everything over the Windows-mounted folder (`/mnt/c`). Later runs use the build cache and are fast. Run long commands in the background or with a long timeout.
+16. **Grafana shows "No data":** is `beevmd serve` running on `127.0.0.1:8080` (Prometheus' target)? Check http://127.0.0.1:9090/targets; the target must be UP. Panels need a few calls first (rates and quantiles need two scrapes). The logs are in `~/.beevm/monitoring/logs/`.
 
 ## Appendix E: regenerating these documents
 

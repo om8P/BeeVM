@@ -42,7 +42,8 @@ download() {
   fi
   mkdir -p "$(dirname "$dest")"
   log "downloading $(basename "$dest")"
-  curl -fL --retry 3 --progress-bar -o "$dest.part" "$url"
+  # A stalled connection (under 1 KB/s for a minute) fails instead of hanging forever.
+  curl -fL --retry 3 --connect-timeout 20 --speed-limit 1024 --speed-time 60 --progress-bar -o "$dest.part" "$url"
   mv "$dest.part" "$dest"
   if [ -n "$sha" ]; then
     echo "$sha  $dest" | sha256sum -c --quiet - || { rm -f "$dest"; die "checksum mismatch for $dest"; }
@@ -53,3 +54,11 @@ download() {
 # serves binaries (410 Gone), so scripts/minio.sh builds this pinned source version with Go.
 # The Go checksum database guarantees the source is what it was when we pinned it.
 export MINIO_GO_VERSION="v0.0.0-20260212201848-7aac2a2c5b7c"
+
+# Monitoring (M10, optional; checked 2026-11-06): Prometheus and Grafana as plain release
+# tarballs, no Docker. Prometheus 3.16.0 was one day old, so the previous release is pinned.
+# The Grafana tarball is ~480 MB (downloaded once into $BEEVM_HOME/cache).
+export PROMETHEUS_VERSION="3.15.1"
+export PROMETHEUS_SHA256="6a726885328ad9efebbf36e876ce2fb6225468a71fd1e7ce3ba666d5f4d97a84"
+export GRAFANA_VERSION="13.3.0"
+export GRAFANA_SHA256="cec8f98cc59bc1a1945833b652371a073be678c5c159a9b1695ad63c04fae5a7"

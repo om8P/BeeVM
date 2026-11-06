@@ -1,0 +1,12 @@
+# Prometheus for BeeVM (optional module, M10). Used by `make monitoring` and the Compose
+# "monitoring" profile. beevmd serve must listen on 127.0.0.1:8080 (the default).
+global:
+  scrape_interval: 1s      # fast, for a live demo; 10-15 s is normal in production
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: beevmd
+    static_configs:
+      - targets: ["127.0.0.1:8080"]
+        labels:
+          node: local

@@ -50,6 +50,12 @@ func e2eServer(t *testing.T, maxVMs int, queueWait time.Duration) (*apiclient.Cl
 // e2eServerWith starts the API with the runner that mk builds from the VM base config.
 func e2eServerWith(t *testing.T, mk func(base vmm.Config) runner.Runner) (*apiclient.Client, string, string) {
 	t.Helper()
+	return e2eServerDeps(t, mk, nil)
+}
+
+// e2eServerDeps is e2eServerWith with a chance to change the server's Deps (after mk ran).
+func e2eServerDeps(t *testing.T, mk func(base vmm.Config) runner.Runner, change func(*Deps)) (*apiclient.Client, string, string) {
+	t.Helper()
 	home := os.Getenv("BEEVM_HOME")
 	if home == "" {
 		h, _ := os.UserHomeDir()
@@ -73,10 +79,14 @@ func e2eServerWith(t *testing.T, mk func(base vmm.Config) runner.Runner) (*apicl
 	}
 	t.Cleanup(func() { reg.Close() })
 	code, _ := codestore.New(t.TempDir())
-	ts := httptest.NewServer(New(Deps{
+	deps := Deps{
 		Registry: reg, Code: code, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Runner: mk(base),
-	}).Handler())
+	}
+	if change != nil {
+		change(&deps)
+	}
+	ts := httptest.NewServer(New(deps).Handler())
 	t.Cleanup(ts.Close)
 
 	tn, _ := reg.CreateTenant("alice")

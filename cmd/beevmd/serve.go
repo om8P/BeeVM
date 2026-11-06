@@ -18,6 +18,7 @@ import (
 	"github.com/om8P/BeeVM/internal/agentproto"
 	"github.com/om8P/BeeVM/internal/api"
 	"github.com/om8P/BeeVM/internal/codestore"
+	"github.com/om8P/BeeVM/internal/metrics"
 	"github.com/om8P/BeeVM/internal/pool"
 	"github.com/om8P/BeeVM/internal/registry"
 	"github.com/om8P/BeeVM/internal/runner"
@@ -41,6 +42,22 @@ func openRegistry(home string) (*registry.Registry, error) {
 	return registry.Open(filepath.Join(home, "beevm.db"))
 }
 
+// newLogger makes the server's logger: JSON lines (for log tools) or text (for reading).
+func newLogger(level, format string) (*slog.Logger, error) {
+	var lv slog.Level
+	if err := lv.UnmarshalText([]byte(level)); err != nil {
+		return nil, fmt.Errorf("--log-level must be debug, info, warn or error, not %q", level)
+	}
+	opts := &slog.HandlerOptions{Level: lv}
+	switch format {
+	case "json":
+		return slog.New(slog.NewJSONHandler(os.Stderr, opts)), nil
+	case "text":
+		return slog.New(slog.NewTextHandler(os.Stderr, opts)), nil
+	}
+	return nil, fmt.Errorf("--log-format must be json or text, not %q", format)
+}
+
 // runServe starts the HTTP API.
 func runServe(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
@@ -55,9 +72,20 @@ func runServe(args []string) int {
 	s3Region := fs.String("s3-region", envOr("BEEVM_S3_REGION", "us-east-1"), "S3 region (env BEEVM_S3_REGION)")
 	s3PathStyle := fs.Bool("s3-path-style", os.Getenv("BEEVM_S3_ENDPOINT") != "", "use path-style S3 URLs (needed for MinIO; default on when an endpoint is set)")
 	isoFlags := addIsolationFlags(fs)
+	withMetrics := fs.Bool("metrics", true, "serve Prometheus metrics at GET /metrics on --addr (no API key: keep --addr on localhost or firewalled)")
+	logLevel := fs.String("log-level", "info", "debug, info, warn or error")
+	logFormat := fs.String("log-format", "json", "json (one JSON object per line) or text")
 	_ = fs.Parse(args)
 
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	logger, err := newLogger(*logLevel, *logFormat)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 2
+	}
+	var mets *metrics.Metrics
+	if *withMetrics {
+		mets = metrics.New()
+	}
 	home := beevmHome()
 
 	reg, err := openRegistry(home)
@@ -148,6 +176,9 @@ func runServe(args []string) int {
 		for rt, path := range images {
 			snaps.SetRootfs(rt, path)
 		}
+		if mets != nil {
+			snaps.SetObserver(mets.ObserveSnapshotBuild)
+		}
 		if n, err := snaps.RemoveStale(); err == nil && n > 0 {
 			logger.Info("removed snapshots that no longer match the images", "count", n)
 		}
@@ -190,12 +221,16 @@ func runServe(args []string) int {
 			}
 			run = s
 		} else {
-			w := runner.NewWarmRunner(base, snaps, pool.Config{
-				MaxVMs: *maxVMs, KeepAlive: *keepAlive, QueueWait: *queueWait, Logger: logger,
-			}, logger)
+			pcfg := pool.Config{MaxVMs: *maxVMs, KeepAlive: *keepAlive, QueueWait: *queueWait, Logger: logger}
+			if mets != nil {
+				pcfg.OnRecycle = mets.ObserveRecycle
+			}
+			w := runner.NewWarmRunner(base, snaps, pcfg, logger)
 			for rt, path := range images {
 				w.SetRootfs(rt, path)
 			}
+			// VMs per state and memory per VM, read whenever Prometheus scrapes.
+			mets.Register(metrics.NewPoolCollector(func() []pool.VMInfo { return w.VMs(0) }, w.MaxVMs()))
 			run = w
 		}
 	default:
@@ -214,7 +249,7 @@ func runServe(args []string) int {
 	}
 
 	handler := api.New(api.Deps{
-		Registry: reg, Code: code, Logger: logger, Runner: run,
+		Registry: reg, Code: code, Logger: logger, Runner: run, Metrics: mets,
 	}).Handler()
 	srv := &http.Server{Addr: *addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 
@@ -223,7 +258,7 @@ func runServe(args []string) int {
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
-	logger.Info("listening", "addr", *addr, "max_vms", *maxVMs, "runner", *runnerKind, "keep_alive", keepAlive.String(), "runtimes", append([]string{agentproto.RuntimeBinary}, available...), "home", home, "isolation", *isoFlags.mode)
+	logger.Info("listening", "addr", *addr, "metrics", *withMetrics, "max_vms", *maxVMs, "runner", *runnerKind, "keep_alive", keepAlive.String(), "runtimes", append([]string{agentproto.RuntimeBinary}, available...), "home", home, "isolation", *isoFlags.mode)
 
 	select {
 	case err := <-errCh:
