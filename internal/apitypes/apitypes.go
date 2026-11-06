@@ -64,6 +64,7 @@ type VM struct {
 	Since    time.Time `json:"since"`    // when it entered State
 	LastUsed time.Time `json:"last_used"`
 	Calls    int64     `json:"calls"`
+	Addr     string    `json:"addr,omitempty"` // network address for the tenant's other VMs (isolated servers only)
 }
 
 // VMList is the answer to GET /api/v1/vms.

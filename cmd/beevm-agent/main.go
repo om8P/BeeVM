@@ -29,6 +29,10 @@ func main() {
 	// stderr is the serial console, so the host can see these lines in console.log.
 	log.SetFlags(0)
 	log.SetPrefix("beevm-agent: ")
+	if err := agent.HardenAgent(); err != nil {
+		log.Printf("warning: %v", err)
+	}
+	agent.WarmUp()
 
 	ln, err := vsock.Listen(agentproto.Port, nil)
 	if err != nil {

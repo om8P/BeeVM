@@ -97,6 +97,9 @@ fakeroot sh -c "
     awk '/^P:/{p=substr(\$0,3)} /^V:/{print p, substr(\$0,3)}' '$WORK/root/lib/apk/db/installed' \
       > '$WORK/root/etc/beevm/versions'
   fi
+  # The unprivileged user functions run as (see internal/agent/sandbox.go).
+  echo 'fn:x:1000:1000:BeeVM function:/tmp:/sbin/nologin' >> '$WORK/root/etc/passwd'
+  echo 'fn:x:1000:' >> '$WORK/root/etc/group'
   install -m 0755 '$HERE/init' '$WORK/root/sbin/beevm-init'
   install -m 0755 '$AGENT_BIN' '$WORK/root/sbin/beevm-agent'
   mkfs.ext4 -q -F -d '$WORK/root' -L beevm-root '$OUT.part' ${SIZE_MB}M

@@ -30,8 +30,20 @@ case "$MODE" in
   agent)
     # /run and /tmp are RAM (tmpfs). The root disk may be shared by many VMs and read-only,
     # so the uploaded function (in /run) and anything a function writes (in /tmp) live in RAM.
-    mount -t tmpfs tmpfs /run
-    mount -t tmpfs tmpfs /tmp
+    # Functions run as user fn (uid 1000): /run is root's only, /tmp is for everyone but
+    # capped at a quarter of the RAM so a full /tmp cannot starve the agent.
+    mount -t tmpfs -o mode=0755 tmpfs /run
+    mount -t tmpfs -o mode=1777,size=25% tmpfs /tmp
+    ip link set lo up 2>/dev/null
+    # beevm.net=1 (isolated VMs, milestone 9): the host put a TAP device in this VM's own
+    # network namespace. Every VM gets the same address; the host translates it.
+    if grep -q 'beevm\.net=1' /proc/cmdline; then
+      if ip link set eth0 up && ip addr add 172.16.0.2/30 dev eth0 && ip route add default via 172.16.0.1; then
+        echo "BEEVM_NET_UP 172.16.0.2"
+      else
+        echo "BEEVM_NET_FAILED"
+      fi
+    fi
     /sbin/beevm-agent &
     AGENT_PID=$!
     echo "BEEVM_AGENT_STARTED"

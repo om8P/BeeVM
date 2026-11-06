@@ -55,6 +55,10 @@ type Inputs struct {
 	BuildVersion       int    `json:"build_version"` // how the snapshot is made (see BuildVersion)
 	// Runtime is empty for binaries, so binary keys are the same as before runtimes existed.
 	Runtime string `json:"runtime,omitempty"`
+	// Isolation is the isolator's name ("" without isolation, so those keys stay unchanged).
+	// A snapshot taken in a jail names its files as the jail sees them, and one taken with a
+	// network card needs one when restored: it only fits VMs isolated the same way.
+	Isolation string `json:"isolation,omitempty"`
 }
 
 // BuildVersion numbers the way buildVM prepares a VM before snapshotting it. Bump it when that
@@ -265,6 +269,19 @@ func (m *Manager) Inputs(memMiB, vcpus int64) (Inputs, error) {
 
 // RuntimeInputs returns what a runtime snapshot depends on right now.
 func (m *Manager) RuntimeInputs(runtime string, memMiB, vcpus int64) (Inputs, error) {
+	return m.runtimeInputs(runtime, memMiB, vcpus, m.isolation())
+}
+
+// isolation is the name of the base config's isolator ("" for none).
+func (m *Manager) isolation() string {
+	if m.base.Isolator == nil {
+		return ""
+	}
+	return m.base.Isolator.Name()
+}
+
+// runtimeInputs is RuntimeInputs for a given isolation (List judges every snapshot by its own).
+func (m *Manager) runtimeInputs(runtime string, memMiB, vcpus int64, isolation string) (Inputs, error) {
 	if runtime == "" {
 		runtime = agentproto.RuntimeBinary
 	}
@@ -292,7 +309,7 @@ func (m *Manager) RuntimeInputs(runtime string, memMiB, vcpus int64) (Inputs, er
 	in := Inputs{
 		FirecrackerVersion: m.version, KernelSHA256: kernel, RootfsSHA256: rootfs,
 		RootfsPath: rootfsPath, BootArgs: BootArgs, MemMiB: memMiB, VCPUs: vcpus,
-		BuildVersion: BuildVersion,
+		BuildVersion: BuildVersion, Isolation: isolation,
 	}
 	if runtime != agentproto.RuntimeBinary {
 		in.Runtime = runtime
@@ -570,6 +587,8 @@ func (m *Manager) freeze(ctx context.Context, vm *vmm.VM, settle time.Duration, 
 // A runtime snapshot is current when it matches the current inputs of its own runtime; a
 // function snapshot when its parent is the current runtime snapshot (and it was built the
 // current way). Whether its function still exists is not known here: see RemoveOrphans.
+// Each snapshot is judged by its own isolation, so a server with --isolation jailer does not
+// delete the snapshots of a server without it (and the other way round).
 func (m *Manager) List() ([]Info, error) {
 	entries, err := os.ReadDir(m.dir)
 	if err != nil {
@@ -585,7 +604,7 @@ func (m *Manager) List() ([]Info, error) {
 			continue
 		}
 		info := Info{Snapshot: s}
-		if in, err := m.RuntimeInputs(s.RuntimeName(), s.Inputs.MemMiB, s.Inputs.VCPUs); err == nil {
+		if in, err := m.runtimeInputs(s.RuntimeName(), s.Inputs.MemMiB, s.Inputs.VCPUs, s.Inputs.Isolation); err == nil {
 			if s.IsFunction() {
 				info.Current = s.Function != nil && s.Function.ParentKey == Key(in) &&
 					s.Function.BuildVersion == FunctionBuildVersion

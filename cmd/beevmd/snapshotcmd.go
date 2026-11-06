@@ -11,12 +11,15 @@ import (
 	"time"
 
 	"github.com/om8P/BeeVM/internal/snapshot"
+	"github.com/om8P/BeeVM/internal/vmm"
 )
 
-// snapshotManager opens the Snapshot Manager for this BEEVM_HOME.
-func snapshotManager(home string, logf func(string, ...any)) (*snapshot.Manager, error) {
+// snapshotManager opens the Snapshot Manager for this BEEVM_HOME. iso may be nil (no isolation);
+// with one, snapshots are built in a jail and only fit isolated VMs.
+func snapshotManager(home string, iso vmm.Isolator, logf func(string, ...any)) (*snapshot.Manager, error) {
 	base := vmConfig(home, snapshot.BootArgs, 1, 128)
 	base.BaseDir = filepath.Join(home, "run", "vms")
+	base.Isolator = iso
 	m, err := snapshot.New(filepath.Join(home, "snapshots"), base, logf)
 	if err != nil {
 		return nil, err
@@ -35,7 +38,7 @@ func runSnapshot(args []string) int {
 	}
 	home := beevmHome()
 	say := func(f string, a ...any) { fmt.Printf("== "+f+"\n", a...) }
-	m, err := snapshotManager(home, say)
+	m, err := snapshotManager(home, nil, say)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
@@ -47,7 +50,21 @@ func runSnapshot(args []string) int {
 		mem := fs.Int64("mem", 128, "guest memory in MiB")
 		vcpus := fs.Int64("vcpus", 1, "number of virtual CPUs")
 		rt := fs.String("runtime", "binary", "runtime snapshot to build: binary, python or node")
+		isoFlags := addIsolationFlags(fs)
 		_ = fs.Parse(args[1:])
+		var base vmm.Config
+		iso, err := isoFlags.open(home, &base, nil, 1)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			return 1
+		}
+		defer closeIsolation(iso)
+		if iso != nil {
+			if m, err = snapshotManager(home, iso, say); err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+				return 1
+			}
+		}
 		if !m.HasRuntime(*rt) {
 			fmt.Fprintf(os.Stderr, "error: no image for runtime %q (run: make images)\n", *rt)
 			return 1
@@ -74,7 +91,7 @@ func runSnapshot(args []string) int {
 			return 0
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "KEY\tKIND\tRUNTIME\tFUNCTION\tMEMORY\tVCPUS\tSIZE\tBUILD\tCREATED\tSTATUS")
+		fmt.Fprintln(w, "KEY\tKIND\tRUNTIME\tISOLATION\tFUNCTION\tMEMORY\tVCPUS\tSIZE\tBUILD\tCREATED\tSTATUS")
 		for _, s := range list {
 			status := "current"
 			if !s.Current {
@@ -84,7 +101,11 @@ func runSnapshot(args []string) int {
 			if s.Function != nil {
 				fn = fmt.Sprintf("%d (tenant %d)", s.Function.FunctionID, s.Function.TenantID)
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d MiB\t%d\t%s\t%d ms\t%s\t%s\n", s.Key, s.Kind, s.RuntimeName(), fn,
+			isoName := s.Inputs.Isolation
+			if isoName == "" {
+				isoName = "none"
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d MiB\t%d\t%s\t%d ms\t%s\t%s\n", s.Key, s.Kind, s.RuntimeName(), isoName, fn,
 				s.Inputs.MemMiB, s.Inputs.VCPUs, humanBytes(s.MemBytes), s.BuildMS,
 				s.CreatedAt.Local().Format("2006-01-02 15:04:05"), status)
 		}

@@ -38,6 +38,7 @@ func runInvoke(args []string) int {
 	mem := fs.Int64("mem", 128, "guest memory in MiB")
 	vcpus := fs.Int64("vcpus", 1, "number of virtual CPUs")
 	restore := fs.Bool("restore", false, "restore the VM from the base snapshot instead of booting (builds the snapshot if needed)")
+	isoFlags := addIsolationFlags(fs)
 	_ = fs.Parse(args)
 
 	if *code == "" {
@@ -63,6 +64,12 @@ func runInvoke(args []string) int {
 	cfg := vmConfig(home, snapshot.BootArgs, *vcpus, *mem)
 	cfg.SharedRootfs = true
 	cfg.RootfsPath = rootfsFor(home, fn.Runtime)
+	iso, err := isoFlags.open(home, &cfg, nil, 2)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	defer closeIsolation(iso)
 
 	var vm *vmm.VM // set once the VM exists
 	defer func() {
@@ -114,7 +121,7 @@ func runInvoke(args []string) int {
 	startCtx, cancelStart := context.WithTimeout(sigCtx, *readyTimeout)
 	defer cancelStart()
 	if *restore {
-		snaps, err := snapshotManager(home, func(f string, a ...any) {
+		snaps, err := snapshotManager(home, cfg.Isolator, func(f string, a ...any) {
 			fmt.Printf("== "+f+"\n", a...)
 		})
 		if err != nil {

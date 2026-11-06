@@ -41,6 +41,8 @@ type Server struct {
 	shim     *shim
 	loaded   string
 
+	sb *sandbox // limits for the function's processes (nil when the agent is not root)
+
 	// mu makes uploads and invocations run one at a time: a FaaS VM serves one request
 	// at a time, and an upload must not replace the binary while it is running.
 	mu sync.Mutex
@@ -51,7 +53,7 @@ type Server struct {
 func New(funcPath, version string) *Server {
 	return &Server{funcPath: funcPath, version: version, started: time.Now(),
 		setClock: setSystemClock, addEntropy: addKernelEntropy,
-		codeDir: filepath.Join(filepath.Dir(funcPath), "code"), shimCmds: defaultShims}
+		codeDir: filepath.Join(filepath.Dir(funcPath), "code"), shimCmds: defaultShims, sb: newSandbox()}
 }
 
 // Handler returns the HTTP handler for the agent's endpoints.
@@ -169,6 +171,7 @@ func (s *Server) run(payload []byte, timeout time.Duration) agentproto.InvokeRes
 	cmd.Stderr = &stderr
 	// Own process group, so a timeout can kill the function AND anything it started.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	s.sb.apply(cmd) // not as root
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	// If a stray child keeps the output pipes open, do not wait for it forever.
 	cmd.WaitDelay = 2 * time.Second
@@ -180,8 +183,10 @@ func (s *Server) run(payload []byte, timeout time.Duration) agentproto.InvokeRes
 		return resp
 	}
 	pgid := cmd.Process.Pid
+	s.sb.started(pgid)
 	waitErr := cmd.Wait()
 	_ = syscall.Kill(-pgid, syscall.SIGKILL) // clean up children the function left behind
+	s.sb.sweep(s.shimGroup())                // and those that left its process group (setsid)
 	resp.DurationMS = time.Since(start).Milliseconds()
 	resp.Stderr = stderr.String()
 	if cmd.ProcessState != nil {

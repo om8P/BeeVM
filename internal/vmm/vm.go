@@ -37,33 +37,71 @@ type VM struct {
 
 	exited       chan struct{} // closed when the firecracker process has exited
 	shutdownOnce sync.Once     // machine.Shutdown closes a channel, so it may only run once
+
+	release     func() // undoes the Isolator's setup (nil without one)
+	releaseOnce sync.Once
 }
 
 // New creates the VM's folder and (unless SharedRootfs) copies the base rootfs into it.
-// No process is started.
+// With an Isolator it also sets up the VM's isolation and jail. No process is started.
 func New(cfg Config) (*VM, error) {
-	cfg, err := cfg.applyDefaults()
+	cfg, release, err := isolate(cfg)
 	if err != nil {
 		return nil, err
 	}
+	fail := func(err error) (*VM, error) {
+		_ = os.RemoveAll(cfg.Dir())
+		if cfg.Jail != nil {
+			_ = removeJail(cfg)
+		}
+		if release != nil {
+			release()
+		}
+		return nil, err
+	}
 	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid vm config: %w", err)
+		return fail(fmt.Errorf("invalid vm config: %w", err))
 	}
 	if err := os.MkdirAll(cfg.Dir(), 0o700); err != nil {
-		return nil, fmt.Errorf("create vm folder: %w", err)
+		return fail(fmt.Errorf("create vm folder: %w", err))
 	}
 	if !cfg.SharedRootfs {
 		if err := copyFile(cfg.RootfsPath, cfg.VMRootfsPath()); err != nil {
-			_ = os.RemoveAll(cfg.Dir())
-			return nil, fmt.Errorf("copy rootfs: %w", err)
+			return fail(fmt.Errorf("copy rootfs: %w", err))
 		}
 	}
-	return newVM(cfg, 10*time.Millisecond), nil
+	if cfg.Jail != nil {
+		if err := prepareJail(cfg, map[string]string{jailKernel: cfg.KernelPath, jailRootfs: cfg.RootfsPath}); err != nil {
+			return fail(err)
+		}
+	}
+	v := newVM(cfg, 10*time.Millisecond)
+	v.release = release
+	return v, nil
+}
+
+// isolate fills in defaults and lets the Isolator (if any) set up Jail and Net.
+func isolate(cfg Config) (Config, func(), error) {
+	cfg, err := cfg.applyDefaults()
+	if err != nil {
+		return cfg, nil, err
+	}
+	if cfg.Isolator == nil {
+		return cfg, nil, nil
+	}
+	release, err := cfg.Isolator.Prepare(&cfg)
+	if err != nil {
+		return cfg, nil, fmt.Errorf("isolate vm: %w", err)
+	}
+	return cfg, release, nil
 }
 
 func newVM(cfg Config, agentPoll time.Duration) *VM {
 	return &VM{cfg: cfg, exited: make(chan struct{}), agent: newAgentClient(cfg.VsockPath()), agentPoll: agentPoll}
 }
+
+// Config returns the VM's config (with defaults and isolation filled in).
+func (v *VM) Config() Config { return v.cfg }
 
 // Agent returns the client for this VM's guest agent. It only works when the guest runs with
 // beevm.mode=agent, and after WaitForAgent has succeeded.
@@ -195,14 +233,21 @@ func (v *VM) Start(ctx context.Context) error {
 	// The firecracker process is tied to this context, so it must outlive Start.
 	vmCtx, cancel := context.WithCancel(context.Background())
 
-	cmd := firecracker.VMCommandBuilder{}.
-		WithBin(v.cfg.FirecrackerBin).
-		WithSocketPath(v.cfg.SocketPath()).
-		WithStdout(console).
-		WithStderr(console).
-		Build(vmCtx) // Stdin is nil, which means /dev/null
-	// Firecracker runs inside the VM folder, so relative paths (the vsock socket) land there.
-	cmd.Dir = v.cfg.Dir()
+	var cmd *exec.Cmd
+	if v.cfg.Jail != nil {
+		// The jailer makes the jail's root Firecracker's "/" and working folder.
+		cmd = jailerCommand(vmCtx, v.cfg)
+		cmd.Stdout, cmd.Stderr = console, console
+	} else {
+		cmd = firecracker.VMCommandBuilder{}.
+			WithBin(v.cfg.FirecrackerBin).
+			WithSocketPath(v.cfg.SocketPath()).
+			WithStdout(console).
+			WithStderr(console).
+			Build(vmCtx) // Stdin is nil, which means /dev/null
+		// Firecracker runs inside the VM folder, so relative paths (the vsock socket) land there.
+		cmd.Dir = v.cfg.Dir()
+	}
 
 	logger := logrus.New()
 	logger.SetOutput(io.Discard) // the SDK is chatty; real problems come back as errors
@@ -249,13 +294,27 @@ func (v *VM) Start(ctx context.Context) error {
 // sdkConfig translates our Config into the SDK's.
 func (v *VM) sdkConfig() firecracker.Config {
 	smtOff := false
+	kernel, rootfs := v.cfg.KernelPath, v.cfg.VMRootfsPath()
+	if v.cfg.Jail != nil {
+		kernel, rootfs = "/"+jailKernel, "/"+jailRootfs // as Firecracker sees them in its jail
+	}
+	var nics firecracker.NetworkInterfaces
+	if n := v.cfg.Net; n != nil {
+		// No IP settings here: the guest's init configures eth0 itself (beevm.net=1).
+		nics = firecracker.NetworkInterfaces{{StaticConfiguration: &firecracker.StaticNetworkConfiguration{
+			MacAddress: n.GuestMAC, HostDevName: n.HostDev}}}
+	}
 	return firecracker.Config{
 		SocketPath:      v.cfg.SocketPath(),
-		KernelImagePath: v.cfg.KernelPath,
+		KernelImagePath: kernel,
 		KernelArgs:      v.cfg.BootArgs(),
+		// In a jail the SDK cannot check the files (it looks for /vmlinux on the host); New
+		// already checked the real ones.
+		DisableValidation: v.cfg.Jail != nil,
+		NetworkInterfaces: nics,
 		// A shared rootfs is read-only (Firecracker then tells the kernel to mount it "ro"),
 		// so many VMs can use the same file at once.
-		Drives: firecracker.DrivesBuilder{}.WithRootDrive(v.cfg.VMRootfsPath(),
+		Drives: firecracker.DrivesBuilder{}.WithRootDrive(rootfs,
 			firecracker.WithReadOnly(v.cfg.SharedRootfs)).Build(),
 		// Leave ID empty: Firecracker 1.x no longer uses vsock_id, and the SDK then omits it.
 		// The path is relative to the VM folder (see VsockRelPath).
@@ -342,17 +401,36 @@ func (v *VM) CreateSnapshot(ctx context.Context, memPath, statePath string) erro
 	v.mu.Lock()
 	machine, started := v.machine, v.started
 	v.mu.Unlock()
-	switch {
-	case machine != nil:
-		return machine.CreateSnapshot(ctx, memPath, statePath)
-	case started:
+	if !started {
+		return errors.New("vm not started")
+	}
+	// A jailed Firecracker can only write inside its jail: it writes there, then we move the
+	// files out (same filesystem, so a rename) and hand them to the owner of BeeVM's folder.
+	fcMem, fcState := memPath, statePath
+	if j := v.cfg.Jail; j != nil {
+		fcMem, fcState = "/"+jailNewMem, "/"+jailNewState
+	}
+	var err error
+	if machine != nil {
+		err = machine.CreateSnapshot(ctx, fcMem, fcState)
+	} else {
 		api := newFCAPI(v.cfg.SocketPath())
 		defer api.close()
-		return api.put(ctx, "/snapshot/create", map[string]string{
-			"snapshot_type": "Full", "snapshot_path": statePath, "mem_file_path": memPath,
+		err = api.put(ctx, "/snapshot/create", map[string]string{
+			"snapshot_type": "Full", "snapshot_path": fcState, "mem_file_path": fcMem,
 		})
 	}
-	return errors.New("vm not started")
+	if err != nil || v.cfg.Jail == nil {
+		return err
+	}
+	root := v.cfg.JailRoot()
+	if err := moveOut(filepath.Join(root, jailNewMem), memPath, v.cfg.Jail.FileOwner); err != nil {
+		return fmt.Errorf("move snapshot out of the jail: %w", err)
+	}
+	if err := moveOut(filepath.Join(root, jailNewState), statePath, v.cfg.Jail.FileOwner); err != nil {
+		return fmt.Errorf("move snapshot out of the jail: %w", err)
+	}
+	return nil
 }
 
 // Stop asks the guest to shut down (Ctrl-Alt-Del) and waits until ctx ends; if the VM has
@@ -407,8 +485,8 @@ func (v *VM) Kill() {
 	}
 }
 
-// Cleanup kills the VM if it is still running and deletes its folder. With keepLogs the
-// folder stays but only console.log is kept.
+// Cleanup kills the VM if it is still running and deletes its folder (and its jail, and undoes
+// its isolation). With keepLogs the folder stays but only console.log is kept.
 func (v *VM) Cleanup(keepLogs bool) error {
 	v.Kill()
 	v.agent.Close()
@@ -422,8 +500,15 @@ func (v *VM) Cleanup(keepLogs bool) error {
 	}
 	v.mu.Unlock()
 
+	jailErr := removeJail(v.cfg)
+	// Only after the process is gone: the isolator then frees the VM's UID, cgroup and network.
+	v.releaseOnce.Do(func() {
+		if v.release != nil {
+			v.release()
+		}
+	})
 	if !keepLogs {
-		return os.RemoveAll(v.cfg.Dir())
+		return errors.Join(jailErr, os.RemoveAll(v.cfg.Dir()))
 	}
 	entries, err := os.ReadDir(v.cfg.Dir())
 	if err != nil {

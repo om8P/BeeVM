@@ -1696,6 +1696,132 @@ To find every old reference before a rename: `grep -rIl "old-name" --exclude-dir
 
 ---
 
+## Part 12: Milestone 9, isolation and networking
+
+**Goal:** the "tenant isolation, verified by tests" grading point. A MicroVM already gives every function its own kernel; milestone 9 adds the layers *around* the Firecracker process, so that even a guest that broke out into it gains little, plus a network per VM with rules between tenants, and five attack functions that prove each layer works.
+
+### 12.1 Defence in depth: what stops what
+
+| Layer | Where | What it does |
+|---|---|---|
+| MicroVM | KVM | own kernel, own memory, own disk: guest processes and files are not host processes and files |
+| **Jailer** | host | chroot (really `pivot_root` in its own mount namespace) with only `/dev/kvm`, `/dev/net/tun` and hard-linked files; switches to a unique UID/GID per VM (900000+n); execs Firecracker in place |
+| **seccomp** | host | Firecracker installs its own system-call filter; we never pass `--no-seccomp` and the tests check `Seccomp: 2` on every thread |
+| **cgroups v2** | host | `/sys/fs/cgroup/beevm/t<tenant>/<vm>`: `memory.max` (guest + 64 MiB), `memory.swap.max=0`, `pids.max=32`, `cpu.max` (vCPUs x `--cpu-limit` %) |
+| **Network namespace** | host | one per VM; TAP device for the guest; NAT to a per-VM "clone address"; **nftables** lets only a tenant's own VMs talk; VM->host dropped |
+| Guest user | guest | functions run as `fn` (uid 1000), at most 256 processes; the guest's OOM killer picks the function, never the agent; leftovers are frozen and killed after each call |
+
+Everything on the host needs root, so it is a mode: `--isolation none` (default) is the old, unprivileged behaviour; `--isolation jailer` needs `sudo`. Decided with the user: sudo only for isolated mode, so normal development and the 285 KVM tests stay sudo-free.
+
+### 12.2 The jailer and snapshots
+
+The jailer makes Firecracker's `/` a folder, `$BEEVM_HOME/jail/firecracker/<vm-id>/root`. Everything Firecracker needs must be inside it. We **hard-link** the kernel, the shared root filesystem and the snapshot files in: a hard link is a second name for the same file (no copy, same page cache), which needs the jail on the same filesystem as the images. Inside every jail the names are the same (`/vmlinux`, `/rootfs.ext4`), and that matters: a snapshot stores the disk's path, so a snapshot taken in one jail restores in any other. A jailed Firecracker can only write inside its jail, so `CreateSnapshot` lets it write there and then moves the files out and gives them back to you.
+
+The `vmm` package only knows the mechanism. A small interface, `vmm.Isolator`, lets `internal/isolation` decide the UID, cgroup and network for each VM (`Prepare`) and undo it after the process is gone (`release`, called by `VM.Cleanup`). Because the base config carries the isolator, every path (runners, snapshot builds, `invoke`, `bench`) is isolated without changing their code.
+
+Snapshot keys get an `Isolation` field (left out when empty, so old keys do not change); `List` judges each snapshot by its own mode, so switching modes does not delete the other mode's snapshots.
+
+### 12.3 Networking: Firecracker's "network for clones"
+
+A restored VM believes it has the address it had when the snapshot was taken. So every VM gets the **same** guest address, each in its own network namespace (a private copy of the host's network stack), and NAT gives it a unique address outside:
+
+```
+guest eth0 172.16.0.2 -- tap0 172.16.0.1 [ netns beevm-<n> ] veth0 10.200.x.(4n+2)  <- the VM's "clone address"
+                                                                |  veth pair
+host ------------------------------------------------------ bv<n> 10.200.x.(4n+1)
+```
+
+- **Inside the namespace** (nftables table `ip beevm-vm`): DNAT clone -> 172.16.0.2, SNAT back; drop packets from the guest with a faked sender; the guest may not talk to the namespace itself. tap0 has a **fixed MAC**: a restored guest remembers its gateway's MAC in its ARP cache.
+- **On the host** (table `ip beevm`): one address set per tenant; `forward`: packets from `bv*` are accepted only if source and destination are in the same tenant's set, otherwise dropped; `input`: packets from `bv*` to the host are dropped. Checked statelessly on every packet, so when a slot is reused by another tenant no old connection leaks through.
+- **Forwarding only on the VM links** (`conf.bv<n>.forwarding=1`): the host's global `ip_forward` stays 0. Checked by hand first (`scripts/m9-preflight.sh`). `--egress nat` adds internet access (masquerade) and turns global forwarding on while the server runs.
+- **Slots are reused**: a network does not belong to a tenant, only its set membership does. Networks are created at start-up (`--net-prealloc`, default max VMs + 1) and kept, so a call never waits for one.
+- The guest's `init` sets up eth0 when the kernel command line has `beevm.net=1` (added by the isolator).
+- Code: `internal/netns` (netlink for devices and namespaces, `google/nftables` over netlink: no `nft` binary needed; `sudo nft list ruleset` shows the rules if it is installed).
+
+A Go detail worth knowing: a network namespace belongs to a *thread*, and Go moves goroutines between threads. Code that enters a namespace runs in a fresh goroutine pinned with `runtime.LockOSThread` and never unpinned, so Go throws the thread away afterwards and nothing else can run in the wrong namespace.
+
+### 12.4 Use it
+
+```bash
+make build
+sudo ./bin/beevmd serve --isolation jailer           # BEEVM_HOME is found via SUDO_USER
+# second terminal, as you:
+./bin/beevm deploy hello bin/functions/hello-go-binary
+./bin/beevm invoke hello --payload '{"name":"Om"}' -v
+./bin/beevm vms                                       # ADDRESS column: the VM's clone address
+sudo ls /sys/fs/cgroup/beevm/                         # t<tenant> folders
+ip netns list                                         # beevm-0, beevm-1, ...
+```
+
+Ctrl-C removes every jail, cgroup, namespace and the nftables table, and gives root-created files in `~/.beevm` back to you.
+
+### 12.5 The attacks and the results
+
+`make test-isolation` compiles the tests as you, then runs them with sudo (`scripts/test-isolation.sh`). `TestIsolation` starts real isolated servers with two tenants: alice attacks, bob is the neighbour. Results (2026-11-06, WSL2, 1 vCPU / 128 MiB; table written to `bench/results/isolation-<time>.md`):
+
+| Attack | Stopped by | Observed |
+|---|---|---|
+| Host file read: search the whole guest for a canary written on the host; read `/etc/shadow`, write `/dev/vda`, replace the agent's files | MicroVM; guest user `fn`; host: jailer chroot, own UID, seccomp | 85 files scanned, canary found 0 times; 4/4 tricks denied; function uid 1000; Firecracker uid 900003, seccomp 2, no capabilities, its `/` holds only the jail's 9 entries |
+| Cross-tenant network probe: connect to the other tenant's VM, to the host, scan the VM range | netns per VM; nftables per-tenant sets; VM->host dropped | same tenant: connected (control); alice->bob, bob->alice, host via gateway, host's own address: blocked; scan of 10.200.0.0/24 finds only alice's own VM |
+| Fork bomb, children escaping with `setsid` | guest: 256-process limit, freeze-and-kill sweep after the call; host: `pids.max` 32 | 10 copies started, 2,877 refused; at most 57 tasks; afterwards 1 process left (the counter); Firecracker 4 tasks; neighbour median 2.2 ms before, 2.1 ms during |
+| Memory hog: 1 GiB in a 128 MiB VM | guest OOM killer (agent protected); host `memory.max` | function killed, the same VM answered the next call; Firecracker peak 95 of 192 MiB; host OOM kills 0; neighbour 2.5 ms before and after |
+| CPU hog, 4 s busy loop, server at `--cpu-limit 50` | `cpu.max` | VM used 0.51 CPU, throttled 41 times; neighbour 2.4 ms before, 2.2 ms during |
+| Host memory limit: `memory.max` (64 MiB) below the guest's RAM | `memory.max` on Firecracker | the host killed that VM's Firecracker (call 500), the pool removed the VM, neighbour fine |
+
+Note on the fork bomb: its processes are guest processes, the host never sees them. What stops it is the guest-side limit (`RLIMIT_NPROC` counts threads too, and each Go process has several, hence only ~10 copies); the host's `pids.max` only caps Firecracker's own threads. The architecture doc said "fork bomb stopped by pids.max"; that was corrected.
+
+### 12.6 What isolation costs
+
+`bench coldstart --runs 100 --mode restore,warm`, binary function, same session, Performance mode:
+
+| p50 / p99 (ms) | `--isolation none` | `--isolation jailer` |
+|---|---|---|
+| spawn | 1.4 / 1.9 | 23.4 / 40.0 |
+| load snapshot | 20.0 / 39.5 | 2.9 / 16.0 |
+| **VM ready** | **45.2 / 65.7** | **49.0 / 77.2** |
+| upload | 29.1 / 83.3 | 29.9 / 307.5 |
+| invoke | 21.8 / 25.0 | 20.6 / 30.3 |
+| first response | 97.3 / 145.4 | 101.1 / 375.1 |
+| warm | 1.4 / 3.5 | 1.3 / 5.7 |
+
+- **VM ready costs +3.8 ms p50.** The jailer's start (copying the Firecracker binary into the jail, mount namespace, cgroup, joining the netns) makes *spawn* 22 ms slower, but the snapshot *load* got 17 ms faster. Not investigated further; a guess is that work Firecracker does on its first API call happens earlier in the jailed start. Networks are pre-created, so their setup (several ms) is not in these numbers.
+- The jailed run's upload had outliers (p99 307 ms, max 731 ms) the unjailed run did not; seen once, not explained.
+- **The guest hardening costs ~7 ms on the first call after a restore** (invoke 21.8 ms, M8: 14 ms), in both modes. The first version cost 24 ms: the after-call sweep read the status file of every guest process, which is slow on a just-restored VM (page faults). Now it filters by the owner of `/proc/<pid>` first (one `stat`), and the agent runs the sandbox code once at boot so it is in snapshot memory. Warm calls are unchanged (1.4 ms).
+
+### 12.7 Tests
+
+```bash
+make test             # new: jailer args (no --no-seccomp, no --daemonize), jail paths, SDK config in a jail,
+                      # isolator prepare/release once, slots (FIFO, prefer ready networks), cgroup limits,
+                      # sudo home lookup, isolated snapshot keys and per-mode staleness, clone addresses
+make test-kvm         # unchanged: 285 passing (isolated tests skip without root)
+make test-isolation   # root: jailed boot + snapshot + 2 parallel restores (UID, seccomp, caps, jail, cgroup),
+                      # jailed snapshot through the Snapshot Manager, and TestIsolation (the six attacks above),
+                      # each server checks it left no namespace, veth, jail, cgroup or process behind
+```
+
+### 12.8 Problems we hit
+
+| Problem | Cause and fix |
+|---|---|
+| Same-tenant connection refused, scan found nothing | The NAT rule set the "port range specified" flag without a range, which mapped the port to 0. Removed the flag |
+| After a fork bomb the next call failed (Go exits with code 2: cannot create a thread) | The two-pass sweep could not catch children that keep forking. Then a loop counted zombies (dead, not yet collected by init; a signal to them "succeeds") as killed and ran 500 passes, past the call limit. Now: SIGSTOP everything, pass after pass, until no new process appears (stopped processes cannot fork), then SIGKILL; zombies are skipped |
+| The host memory-limit test passed only on the third try | 96 MiB was too close to the guest's 128 MiB, so the guest's OOM killer acted first; then the test looked while the dead VM was still being recycled. Now 64 MiB and a wait |
+| Under sudo, `HOME` is `/root` | `beevmd` finds `~/.beevm` through `SUDO_USER`; files root creates there are chowned back at start and exit |
+| The SDK checks the kernel path on the host | With the jailer the paths are jail paths: `DisableValidation` (the real files were checked before) |
+
+### 12.9 Decisions and things to know
+
+| Topic | What we decided |
+|---|---|
+| Only one isolated server per host | A lock in `/run/beevm/isolation.lock`; at start it removes what a crashed run left (cgroups, jails, namespaces, the nftables table) |
+| UIDs 900000+ | Clear of normal users and `/etc/subuid` ranges; slots prefer a ready network, so a UID can be reused soon after a VM is gone |
+| Snapshot builds run isolated too | Tenant 0: their own cgroup (`beevm/build`), a network with no tenant set (they reach nobody) |
+| A function that kills its own VM (host OOM) gets 500 | It is the VM that died, not the function; the pool replaces the VM. Could become 502 later |
+| Not done | per-tenant VM quotas (LRU still works across tenants), `--egress nat` is built but not tested yet, seccomp inside the guest, conntrack flush on slot reuse (not needed: rules are stateless) |
+
+---
+
 ## Appendix A: command cheat sheet
 
 All in the **WSL terminal**, in the repo folder, unless marked PowerShell.

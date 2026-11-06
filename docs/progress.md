@@ -15,7 +15,7 @@ Details of each milestone: `docs/milestones.md`.
 | 6 | Snapshots and fast restore (the core) | Done, refined once (restore p50 45 ms; p99 60-67 ms on WSL2, set by KVM load noise and page faults under nested virtualization; page prefetch needs root on WSL, deferred to the cloud node) |
 | 7 | Warm pool | Done (warm call p50 1.6 ms, p99 5.0 ms in the server; restore + first call 88 ms) |
 | 8 | Python and Node.js runtimes, function snapshots | Done (Python 3.14 / Node 24; cold start from a function snapshot p50 58 ms Python, 85 ms Node, 73 ms binary) |
-| 9 | Isolation and networking | Not started |
+| 9 | Isolation and networking | Done (6/6 attacks contained, `make test-isolation`; jailer + network cost +3.8 ms on VM ready p50; guest hardening +7 ms on the first call after a restore) |
 | 10 | Observability (optional module) | Not started |
 | 11 | Web dashboard (optional module) | Not started |
 | 12 | Benchmarks and density | Not started |
@@ -210,3 +210,40 @@ Status values: Not started · In progress · Done · Done, needs refinement (say
   - The Bash tool and heredocs: a quote inside a heredoc broke the command, and `\|` in sed replacements lost its backslash; use the Write/Edit tools for such text.
 - **Refine later:** warm-up call before freezing a function snapshot (needs a warm-up payload contract), diff snapshots / snapshot eviction for disk, prebuild function snapshots for existing functions at `serve` start (now built on their first call), package size limit per memory size, more example functions.
 - **Next:** milestone 9 (isolation and networking).
+
+### 2026-11-06: Milestone 9 (isolation and networking)
+- **Plan:** `C:\Users\ommga\.claude\plans\read-md-files-and-fluffy-otter.md`. Agreed with the user: **sudo only for isolated mode** (`--isolation jailer`; `none` stays the default and unprivileged, so all earlier tests need no sudo); network **default-deny, same tenant allowed, internet only with `--egress nat`**. Full write-up: `developer-guide/guide.md` Part 12.
+- **Step 0, preflight** (`scripts/m9-preflight.sh`, run once with sudo, 23/23 passed): jailer runs Firecracker in a chroot as UID 900000 inside a cgroup; hard links images -> jail work; TAP owned by a UID inside a netns; two namespaces route to each other with forwarding on only their two veths while global `ip_forward` stays 0.
+- **Jailer** (`internal/vmm/jail.go`): one jailer command for boot (SDK with `WithProcessRunner`, `DisableValidation`, jail paths) and restore (own API client); no `--daemonize`/`--new-pid-ns`, so the PID is Firecracker's; kernel, rootfs and snapshot files hard-linked into `$BEEVM_HOME/jail/firecracker/<id>/root` under fixed names; `CreateSnapshot` writes in the jail and moves the files out (chowned to the owner of BEEVM_HOME, 0644). New `vmm.Isolator` interface (`Prepare` -> release, called once by `Cleanup`); `Config.TenantID/Isolator/Jail/Net`.
+- **`internal/isolation`** (Manager, implements `vmm.Isolator`): slots (UID 900000+n, FIFO, prefer slots with a ready network), cgroups v2 written directly (`beevm/t<tenant>/<vm>`, `beevm/build` for snapshot builds; `memory.max` guest+64 MiB, `memory.swap.max=0`, `pids.max` 32, `cpu.max` from `--cpu-limit`), host-wide flock `/run/beevm/isolation.lock`, stale cleanup at start (cgroup leaves, jails, namespaces, nft table), chown-back of root-created files (`ChownTree`).
+- **`internal/netns`**: per slot a namespace `beevm-<n>`, `tap0` (fixed MAC, owned by the slot UID, 172.16.0.1/30), veth `bv<n>` <-> `veth0` with clone address 10.200.x.(4n+2); NAT and anti-spoofing inside the namespace (nft table `ip beevm-vm`); host table `ip beevm` with per-tenant sets (only same-tenant VM traffic; VM->host input dropped; masquerade with egress). Networks pre-created (`--net-prealloc`, default max-vms+1) and reused. Goroutines that enter a namespace run on a locked, thrown-away thread. Deps: `google/nftables` v0.3.0, `vishvananda/netlink`/`netns` now direct.
+- **Snapshots:** `Inputs.Isolation` (omitempty: `none` keys unchanged); `List`/`RemoveStale` judge each snapshot by its own isolation (otherwise switching modes would delete the other mode's snapshots).
+- **Guest hardening (all modes, needs `make images`):** user `fn` (1000) in the images; functions and shims run as fn; agent `oom_score_adj` -1000, `RLIMIT_NPROC` 256, children `oom_score_adj` 1000; after each call leftover fn processes are frozen (SIGSTOP until no new ones) and killed, zombies skipped, `/proc/<pid>` owner checked first (cheap); agent runs this path once at boot (so it is in snapshot memory). `/run` tmpfs 0755, `/tmp` 1777 capped at 25 %. Init configures eth0 on `beevm.net=1`.
+- **Commands:** `--isolation`, `--cpu-limit`, `--uid-base`, `--egress`, `--net-prealloc` on `serve` (and `invoke`, `bench coldstart`, `snapshot build`); `snapshot ls` ISOLATION column; `beevm vms` ADDRESS column (`addr` in `GET /api/v1/vms`); under sudo `BEEVM_HOME` comes from `SUDO_USER`.
+- **Attack functions:** `examples/functions/{forkbomb,memhog,cpuhog,netprobe,hostread}` (in `make examples`).
+- **Verified:** unit tests in all packages (new: jail args/paths/SDK config/isolator, slots, limits, cgroup ensure, home lookup, isolated snapshot keys + per-mode staleness, clone addresses); `go vet` (also `-tags kvm`), gofmt; `make test-kvm` **285 passing** without sudo (agent hardening included); `make test-isolation` all passing: jailed boot + snapshot + 2 parallel restores (own UIDs, Seccomp 2, NoNewPrivs 1, CapEff 0, jail-only `/`, cgroup values, nothing left), jailed Snapshot Manager build, and **TestIsolation, 6/6 attacks** (two tenants, real warm pool; each server checks no namespace, veth, jail, cgroup or process is left):
+
+  | Attack | Observed |
+  |---|---|
+  | Host file read | canary 0 hits in 85 files; 4/4 tricks denied; function uid 1000; Firecracker uid 900003, seccomp 2, no capabilities |
+  | Network probe | same tenant connected; other tenant both ways, host via gateway and host's address blocked; scan of 10.200.0.0/24 finds only own VM |
+  | Fork bomb (setsid) | 10 copies, 2,877 refused, max 57 tasks; 1 process left afterwards; neighbour 2.2 -> 2.1 ms |
+  | Memory hog (1 GiB in 128 MiB) | killed in the guest, same VM serves the next call; Firecracker peak 95 of 192 MiB; host OOM kills 0 |
+  | CPU hog (`--cpu-limit 50`) | 0.51 CPU, throttled 41 times; neighbour 2.4 -> 2.2 ms |
+  | Host memory.max (64 MiB) | host killed that VM's Firecracker, VM replaced, neighbour fine |
+
+- **Benchmark** (`bench coldstart --runs 100 --mode restore,warm`, binary, same session; raw data `bench/results/m9/`):
+
+  | p50 / p99 (ms) | none | jailer |
+  |---|---|---|
+  | spawn | 1.4 / 1.9 | 23.4 / 40.0 |
+  | load | 20.0 / 39.5 | 2.9 / 16.0 |
+  | **VM ready** | **45.2 / 65.7** | **49.0 / 77.2** |
+  | invoke (first call) | 21.8 / 25.0 | 20.6 / 30.3 |
+  | first response | 97.3 / 145.4 | 101.1 / 375.1 |
+  | warm | 1.4 / 3.5 | 1.3 / 5.7 |
+
+  The jailer makes spawn 22 ms slower but the load 17 ms faster (not investigated); net +3.8 ms p50. The jailed upload had outliers (p99 307, max 731 ms) seen once, not explained. Guest hardening first cost +24 ms on the first call after a restore (invoke 38 ms); the cheaper sweep and the boot-time warm-up brought it to +7 ms (M8: 14 ms).
+- **Learned:** a NAT rule with the "proto specified" flag and no port range maps ports to 0 (looked like "connection refused"); killing a fork bomb needs freeze-then-kill, and signalling zombies "succeeds"; the guest's OOM killer acts before a host `memory.max` near the guest size; RLIMIT_NPROC counts threads; under sudo `HOME` is `/root`; a netns belongs to a thread (lock and discard it in Go). The Bash tool still mangles `\n` and `\\t` in heredocs: write edit scripts with the Write tool.
+- **Refine later:** per-tenant VM quotas, test `--egress nat`, look into the jailer's spawn time (it copies the 3.6 MB Firecracker binary into every jail), seccomp inside the guest, return 502 instead of 500 when a function's VM is killed by its host limit.
+- **Next:** milestone 12 (benchmarks and density) per the must-do order, or milestone 10/11 (observability, dashboard).

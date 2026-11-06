@@ -229,6 +229,7 @@ func bootReady(ctx context.Context, base vmm.Config, req Request, res *Result) (
 	cfg := base
 	cfg.MemMiB = req.MemoryMiB
 	cfg.VCPUs = req.VCPUs
+	cfg.TenantID = req.TenantID // the isolator (if any) puts the VM into its tenant's cgroup and network
 	vm, err := vmm.New(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("create vm: %w", err)
@@ -588,7 +589,8 @@ func snapshotKind(snap snapshot.Snapshot) string {
 // BootMS. On error nothing is left behind.
 func restoreReady(ctx context.Context, base vmm.Config, snap snapshot.Snapshot, req Request, res *Result) (*vmm.VM, error) {
 	cfg := base
-	cfg.MemMiB, cfg.VCPUs = req.MemoryMiB, req.VCPUs // informational; the snapshot decides
+	cfg.MemMiB, cfg.VCPUs = req.MemoryMiB, req.VCPUs // the snapshot decides; used for cgroup limits
+	cfg.TenantID = req.TenantID
 	vm, _, err := vmm.Restore(ctx, cfg, snap.Files)
 	if err != nil {
 		return nil, fmt.Errorf("restore vm: %w", err)

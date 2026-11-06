@@ -39,6 +39,24 @@ type Config struct {
 	// Measuring and tuning (restored VMs only; used by the benchmark):
 	FirecrackerMetrics bool  // Firecracker writes metrics.json in the VM folder (see VM.FirecrackerLoadTime)
 	CPUs               []int // host CPUs the firecracker process may run on; empty = any
+
+	// Isolation (milestone 9). All empty = no isolation: firecracker runs as this process's
+	// user, in the host's network, without limits.
+	TenantID int64     // whose VM this is (0 = nobody's, e.g. a snapshot build)
+	Isolator Isolator  // when set, New and Restore ask it to fill in Jail and Net
+	Jail     *Jail     // run firecracker through the jailer (chroot, own UID, cgroup, netns)
+	Net      *NetIface // give the guest a network card
+}
+
+// Isolator sets up the isolation of one VM: it fills in cfg.Jail (and cfg.Net) and returns a
+// function that undoes its setup. New and Restore call Prepare; VM.Cleanup calls release once
+// the firecracker process is gone. The vmm package only knows this interface, so it never
+// decides UIDs, cgroups or addresses itself.
+type Isolator interface {
+	Prepare(cfg *Config) (release func(), err error)
+	// Name says how VMs are isolated, e.g. "jailer-net-1". Snapshots taken with one isolator
+	// do not fit another (the paths inside them differ), so it is part of a snapshot's key.
+	Name() string
 }
 
 // applyDefaults fills empty fields. It returns a copy; the caller's Config is untouched.
@@ -87,6 +105,9 @@ func (c Config) Validate() error {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 		}
 	}
+	if c.Jail != nil {
+		errs = append(errs, c.Jail.validate(c))
+	}
 	return errors.Join(errs...)
 }
 
@@ -101,11 +122,20 @@ func (c Config) BootArgs() string {
 // Dir is this VM's private folder.
 func (c Config) Dir() string { return filepath.Join(c.BaseDir, c.ID) }
 
-// SocketPath is Firecracker's API socket.
-func (c Config) SocketPath() string { return filepath.Join(c.Dir(), "firecracker.sock") }
+// fcDir is the folder Firecracker works in: the VM folder, or with the jailer the jail's root
+// (Firecracker's "/").
+func (c Config) fcDir() string {
+	if c.Jail != nil {
+		return c.JailRoot()
+	}
+	return c.Dir()
+}
+
+// SocketPath is Firecracker's API socket (as the host sees it).
+func (c Config) SocketPath() string { return filepath.Join(c.fcDir(), "firecracker.sock") }
 
 // VsockPath is the Unix socket through which the host reaches the guest's vsock ports.
-func (c Config) VsockPath() string { return filepath.Join(c.Dir(), VsockRelPath) }
+func (c Config) VsockPath() string { return filepath.Join(c.fcDir(), VsockRelPath) }
 
 // VsockRelPath is the vsock socket's name as Firecracker is told it: relative to the VM folder,
 // which is Firecracker's working directory. A snapshot stores this path, so a VM restored in
@@ -113,7 +143,7 @@ func (c Config) VsockPath() string { return filepath.Join(c.Dir(), VsockRelPath)
 const VsockRelPath = "v.sock"
 
 // MetricsPath is where Firecracker writes its metrics when FirecrackerMetrics is set.
-func (c Config) MetricsPath() string { return filepath.Join(c.Dir(), "metrics.json") }
+func (c Config) MetricsPath() string { return filepath.Join(c.fcDir(), "metrics.json") }
 
 // ConsolePath is where guest serial output and Firecracker's own messages are written.
 func (c Config) ConsolePath() string { return filepath.Join(c.Dir(), "console.log") }

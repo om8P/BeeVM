@@ -65,7 +65,18 @@ type warmVM struct {
 	made    Result  // StartKind, BootMS and UploadMS of its creation
 }
 
-func (w *warmVM) ID() string              { return w.id }
+func (w *warmVM) ID() string { return w.id }
+
+// Addr implements pool.Addresser: where the tenant's other VMs reach this one.
+func (w *warmVM) Addr() string {
+	if w.vm == nil {
+		return ""
+	}
+	if n := w.vm.Config().Net; n != nil {
+		return n.Addr
+	}
+	return ""
+}
 func (w *warmVM) Exited() <-chan struct{} { return w.exited }
 func (w *warmVM) Destroy()                { w.destroy() }
 

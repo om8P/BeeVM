@@ -3,7 +3,7 @@ BEEVM_HOME ?= $(HOME)/.beevm
 export BEEVM_HOME
 GO ?= /usr/local/go/bin/go
 
-.PHONY: help setup images kernel rootfs rootfs-python rootfs-node boot boot-test clean-images build examples test test-kvm test-s3 vet minio minio-up minio-down
+.PHONY: help setup images kernel rootfs rootfs-python rootfs-node boot boot-test clean-images build examples test test-kvm test-isolation test-s3 vet minio minio-up minio-down
 
 help:
 	@echo "make setup        one-time install (Go, Firecracker, kernel, rootfs); needs sudo"
@@ -14,6 +14,7 @@ help:
 	@echo "make examples     build example functions (static) into bin/functions/"
 	@echo "make test         Go unit tests (no KVM needed)"
 	@echo "make test-kvm     Go tests that boot real MicroVMs (needs KVM)"
+	@echo "make test-isolation  isolation tests (jailer, cgroups, network, attacks); asks for sudo"
 	@echo "make test-s3     store tests against a real MinIO (start make minio first)"
 	@echo "make minio        build (first time) and run a local MinIO S3 server, no Docker"
 	@echo "make minio-up     same, with Docker Compose (minio-down stops it)"
@@ -46,7 +47,7 @@ build:
 # Functions run inside an Alpine guest (musl), so they must be static: CGO_ENABLED=0.
 examples:
 	@mkdir -p bin/functions
-	@for f in hello-go-binary testfn; do \
+	@for f in hello-go-binary testfn forkbomb memhog cpuhog netprobe hostread; do \
 	  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -ldflags="-s -w" -o bin/functions/$$f ./examples/functions/$$f || exit 1; \
 	  echo "built bin/functions/$$f"; \
 	done
@@ -56,6 +57,14 @@ test:
 
 test-kvm:
 	$(GO) test -tags kvm -v -count=1 ./internal/...
+
+# Compiled as you (Go's build cache stays yours), then run as root by the script.
+# RUN=<regexp> picks tests, e.g. make test-isolation RUN=TestJailed
+ISOLATION_PKGS = isolation api
+test-isolation: examples
+	@mkdir -p bin/test && rm -f bin/test/*.test
+	@for p in $(ISOLATION_PKGS); do $(GO) test -c -tags kvm -o bin/test/$$p.test ./internal/$$p || exit 1; done
+	sudo BEEVM_HOME=$(BEEVM_HOME) RUN='$(RUN)' bash scripts/test-isolation.sh
 
 # Needs `make minio` (or minio-up) running in another terminal.
 test-s3:

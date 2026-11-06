@@ -105,7 +105,7 @@ func (s *Server) listVMs(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, v := range lister.VMs(tenant.ID) {
 		out.VMs = append(out.VMs, apitypes.VM{ID: v.ID, Function: names[v.FunctionID], State: v.State.String(),
-			Since: v.Since, LastUsed: v.LastUsed, Calls: v.Calls})
+			Since: v.Since, LastUsed: v.LastUsed, Calls: v.Calls, Addr: v.Addr})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
