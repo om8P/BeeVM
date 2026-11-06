@@ -19,6 +19,9 @@ It grows with the project: each finished milestone adds a section. The reasons b
 | Part 9: Milestone 7, the warm pool | Done |
 | Part 10: Milestone 8, Python and Node.js runtimes, function snapshots | Done |
 | Part 11: the repository, GitHub and renames | Done |
+| Part 12: Milestone 9, isolation and networking | Done |
+| Part 13: Milestone 10, observability (optional module) | Done |
+| Part 14: Milestone 11, the web dashboard (optional module) | Done |
 | Appendices: cheat sheet, versions, numbers, troubleshooting, regenerating these documents | — |
 
 ---
@@ -47,7 +50,8 @@ Every step in order. Each one is explained in the parts below.
 | 16 | WSL | Milestone 6: `make images build`, then `./bin/beevmd invoke --restore --code bin/functions/hello-go-binary` and `./bin/beevmd bench coldstart --runs 100` (boot vs restore) | 8.6, 8.7 |
 | 17 | WSL | Milestone 7: with `./bin/beevmd serve` running, call `./bin/beevm invoke hello -v` twice (the second says `warm`), then `./bin/beevm vms`; `./bin/beevmd bench coldstart --mode restore,warm` | 9.7, 9.8 |
 | 18 | WSL | Milestone 8: `make images build`, then with `serve` running `./bin/beevm deploy hello-py examples/functions/hello-python` and `./bin/beevm invoke hello-py -v` (says `function snapshot`); `./bin/beevmd bench coldstart --code examples/functions/hello-node --mode restore,function,warm` | 10.5, 10.6 |
-| 19 | WSL | `make test && make test-kvm` (all tests; `make test-s3` too if MinIO is running) | 4.4, 5.7, 6.5, 7.5, 8.8, 9.9, 10.7 |
+| 19 | WSL, optional | Milestone 11: `make ui`, then with `serve` running open http://127.0.0.1:8080/ui/ in the Windows browser, paste the API key, press Invoke | 14.4 |
+| 20 | WSL | `make test && make test-kvm` (all tests; `make test-s3` too if MinIO is running; `make test-ui` for the dashboard) | 4.4, 5.7, 6.5, 7.5, 8.8, 9.9, 10.7, 14.8 |
 
 ---
 
@@ -1924,6 +1928,123 @@ Not checked: reading memory of jailed VMs (`sudo ./bin/beevmd serve --isolation 
 
 ---
 
+## Part 14: Milestone 11, the web dashboard
+
+**Goal:** a live demo screen. Grafana (Part 13) is good for operators; for a demo we want one page that shows MicroVMs appearing, running and disappearing, an Invoke button with the timing of each phase, cold vs warm latency, and how full the node is. **Done when** the dashboard updates live during a load run. It is an **optional module**: it talks to beevmd only through the public API, and deleting `web/` breaks nothing.
+
+Agreed before building: a real Server-Sent Events endpoint in the core API (planned since the architecture doc), Node.js pinned inside WSL like Prometheus and Grafana, `beevmd bench load` as the load (k6 stays in M12), plain CSS.
+
+### 14.1 A browser dashboard in five ideas
+
+1. **The dashboard is just files.** React components are written in TypeScript; **Vite** bundles them into one JavaScript file, one CSS file and an `index.html` in `web/dist/`. beevmd serves that folder at `/ui/` (`--ui-dir`, default `web/dist`). No Go code knows what is inside, there is no `go:embed`, so deleting `web/` cannot break the build.
+2. **Server-Sent Events (SSE) for "live".** The browser opens `GET /api/v1/events` and the answer never ends: the server writes a short text message whenever something happens (`event: vm` + `data: {...}` + an empty line). It is one-way (server to browser), which is all a dashboard needs, and it is plain HTTP, so the same API-key middleware protects it. WebSockets would be two-way and need their own protocol; polling would miss VMs that live for less than the poll interval.
+3. **Snapshot first, then changes.** The stream starts with a `hello` message holding the full list of the caller's VMs, then sends one `vm` message per state change and one `invoke` message per finished call. The server subscribes *before* it reads the list, so nothing that happens in between is lost; applying a change twice does no harm. If the browser falls behind (its buffer of 256 events fills), the server drops events rather than wait and sends a fresh `hello`.
+4. **React = state → screen.** Every component is a function from data to HTML. Events go through a **reducer** (`web/src/state.ts`: old state + event = new state, a pure function, so it is unit-tested without a browser), and React redraws what changed.
+5. **One origin, key in a header.** The page comes from the same server as the API, so the browser allows it to call the API and read the `X-BeeVM-*` timing headers without any CORS setup. The browser's built-in `EventSource` cannot send an `Authorization` header and a key in the URL would end up in logs, so `web/src/sse.ts` reads the stream with `fetch` and parses the SSE text itself (~50 lines). The key you paste is kept in `sessionStorage` (gone when the tab closes), or `localStorage` if you tick "remember".
+
+### 14.2 What it shows
+
+| Panel | Data | Source |
+|---|---|---|
+| Header | stream status (live / reconnecting), calls per second over the last 5 s | the stream |
+| Density tiles | VMs on the node / `--max-vms` (all tenants, numbers only), memory per VM as PSS (and RSS), node memory available, room for more VMs (free slots, and how many VMs of the current size the free memory would hold) | `GET /api/v1/node`, every 2 s |
+| MicroVMs | one tile per VM of your tenant, grouped by function, coloured by state with a letter (R, I, B, ×) and its call count; a tile flashes when a call starts; other tenants' VMs and free slots fill up the rest | `hello` + `vm` events |
+| Invoke | pick a function, edit the JSON payload, Invoke: status, start kind (warm / restore / boot) and snapshot tier, then VM ready, upload, import, function, server total and the browser's round trip | `POST /invoke/{name}` and its headers |
+| Latency: cold vs warm | every call of the last 1, 2 or 5 minutes as a dot, server time on a log scale, coloured by start kind, with the 50 ms target line; below it p50 / p99 per start kind and the cold start itself (VM ready p50 / p99) | `invoke` events |
+| Warm pools | per function: idle, busy, starting VMs, calls seen, a Prewarm N button | events + `POST .../prewarm` |
+
+Colours carry one meaning on the whole page: **blue** = restoring / restore start, **aqua** = idle / warm start, **orange** = busy / boot start, grey = recycling. The three hues were checked with a colour-blindness validator in light and dark mode; because aqua is a little light on a white background, every colour also has a text label (tile letters, table rows).
+
+### 14.3 How it is wired (and what stayed untouched)
+
+- **`internal/events`** (new, core): a small publish/subscribe hub. `Publish` never blocks, because the pool calls it with its lock held: a slow browser must never stop the pool. Each subscriber has a buffered channel; when it is full, events are dropped and the subscriber is marked "lagged". `Close` ends every stream.
+- **`internal/pool`**: one additive hook, `Config.OnStateChange func(StateChange)`, next to M10's `OnRecycle` (same rule: called under the lock, must be quick). Every move goes through `mustMove`, so that is the one place it is called; a new VM is reported once as Restoring. While a VM is being created it is called `pending-N`; when it gets its real ID the next report carries `PrevID`, so the dashboard replaces the tile instead of showing two. The VM-description code of `Stats` moved into a helper shared by both.
+- **`internal/api`**: `Deps.Events` (optional; nil = no stream). `GET /api/v1/events` and `GET /api/v1/node` are in the API-key group. `invoke` events are published from the request middleware right next to the metrics (Part 13.3), so they carry exactly the same numbers. `api.VMEvents(hub)` turns pool changes into events. New types in `internal/apitypes`: `Hello`, `InvokeEvent`, `Node`, `VM.PrevID`.
+- **`internal/metrics`**: the `/proc` readers are now exported (`ReadProcessMemory`, `ReadNodeMemory`) for `/api/v1/node`; the Prometheus collector is unchanged.
+- **`cmd/beevmd serve`**: creates the hub, sets the pool hook, `--ui-dir` (`cmd/beevmd/ui.go`: serves the folder at `/ui/`, unknown paths get `index.html`, a missing `/assets/` file stays 404, hashed assets are cached for a year, `index.html` never). `srv.RegisterOnShutdown(hub.Close)`: `http.Server.Shutdown` waits for open connections, and an event stream never finishes by itself.
+- **`web/`** (optional): `src/api.ts` (types mirroring `apitypes`, a small client), `src/sse.ts` (parser + reconnect with backoff 0.5 to 10 s, stops on 401), `src/state.ts` (reducer), `src/stats.ts` (percentiles, formatting), `src/components/*.tsx`, `src/styles.css` (light and dark), tests `src/*.test.ts` (Vitest). Exact versions in `package.json` and `package-lock.json`: React 19.3.1, Recharts 3.10.1, Vite 8.3.4, TypeScript 6.0.3, Vitest 5.0.5 (each at least three weeks old on 2026-11-06).
+- **Tooling** (optional): `scripts/ui.sh install|build|dev|test` downloads a checksum-verified Node.js 24.22.2 into `~/.beevm/node-24.22.2` (not the guest's Node, which comes from Alpine), runs `npm ci` only when `package-lock.json` changed, then builds. Makefile block `ui`, `ui-dev`, `test-ui`.
+
+### 14.4 Use it
+
+```bash
+make build examples
+make ui                                   # first time: downloads Node (~30 MB), npm ci (~40 s on /mnt/c), builds web/dist
+./bin/beevmd serve                        # terminal 1; the log says ui=true
+./bin/beevmd tenant add demo              # prints the API key once
+# terminal 2:
+export BEEVM_API_KEY=...
+./bin/beevm deploy hello bin/functions/hello-go-binary
+./bin/beevm deploy hello-python examples/functions/hello-python
+./bin/beevm deploy hello-node examples/functions/hello-node
+```
+
+Open **http://127.0.0.1:8080/ui/** in the Windows browser (WSL forwards localhost), paste the key, and press Invoke. For a live demo run a load in terminal 2:
+
+```bash
+./bin/beevmd bench load --fn hello,hello-python,hello-node --rate 20 --duration 1m    # warm path
+```
+
+and, to see cold starts, restart the server with `--keep-alive 2s` and run `--rate 1`: every call then restores a fresh VM and the tiles come and go.
+
+**Changing the dashboard:** `make ui-dev` starts Vite on http://127.0.0.1:5173/ui/ with instant reload; it forwards `/api`, `/invoke` and `/healthz` to beevmd on :8080, so keep `serve` running. Files under `/mnt/c` send no change events into WSL, so the script turns on polling there. `make test-ui` runs the dashboard's tests; `make ui` type-checks and builds.
+
+The API underneath, for any other client:
+
+```bash
+curl -N -H "Authorization: Bearer $BEEVM_API_KEY" 127.0.0.1:8080/api/v1/events     # Ctrl-C to stop
+curl -s -H "Authorization: Bearer $BEEVM_API_KEY" 127.0.0.1:8080/api/v1/node
+```
+
+### 14.5 Removing the optional part
+
+Delete `web/`, `scripts/ui.sh` and the `ui` block at the end of the Makefile. `make build` and every test still pass; `serve` logs "web dashboard not built, serving the API only" and `/ui/` is a 404. Checked by renaming `web/` away: build, `go test ./...` and `serve` all fine. The event stream and `/api/v1/node` are core API and stay.
+
+### 14.6 The live run (2026-11-06, WSL2, `--max-vms 6`, dashboard open in the browser)
+
+| Phase | What the load did | Caller's round trip p50 / p90 / p99 | What the dashboard showed |
+|---|---|---|---|
+| Invoke button | one call of `hello` | 9 ms in the browser | `200`, warm, function 3 ms, server total 5 ms |
+| `--keep-alive 60s`, 20 calls/s for 1 min | 1,200 calls, all 200, all warm | 3.0 / 5.8 / 12.0 ms | 22 calls/s; tile counters and pool table ticking; warm p50 2.2 ms, p99 7.9 ms server time (292 calls in the window) |
+| Ctrl-C on the server | | | server stopped 108 ms after Ctrl-C with the stream open; no VM left; after a restart the page reconnected by itself |
+| `--keep-alive 2s`, 1 call/s for 1 min | 60 calls, all 200, every one a restore from a function snapshot | 83.8 / 112.3 / 148.7 ms | blue dots at 60-150 ms; tiles appear (restoring, busy, idle) and vanish 2 s later; **VM ready p50 47 ms, p99 103 ms** (27 restores in the window) |
+| Prewarm 3 × `hello-python` from the page | | | three idle tiles; **PSS 7.3 MiB vs RSS 18 MiB per VM** (they share one snapshot's pages, as in 13.6) |
+
+Raw load results: `bench/results/m11/` (git-ignored).
+
+### 14.7 Problems we hit
+
+| Problem | Cause and fix |
+|---|---|
+| The dashboard said "1 VM of other tenants" with only one tenant | The node counters come from a poll every 2 s, the tiles from live events; during fast churn (2 s keep-alive) they disagree for a moment. Fix: `/api/v1/node` also returns `tenant_vms`, the caller's own VMs counted at the same moment, and "other tenants" = `vms - tenant_vms` |
+| Server shutdown would hang with a dashboard open | `http.Server.Shutdown` waits until every connection is idle, and an event stream never is. Planned in: `RegisterOnShutdown(hub.Close)` ends the streams (measured: stopped in 108 ms) |
+| The pool hook first reported the old call count | `mustMove` reported the change before `calls++` and `lastUsed` were updated. Found by the hook's unit test; those updates now happen before the move |
+| TypeScript rejected the chart tooltip | Recharts' tooltip types are generic over value and name types that do not match a hand-typed `number, string`. The tooltip now takes a small type of its own |
+| `import './styles.css'` was a type error | TypeScript does not know CSS files; `src/vite-env.d.ts` loads Vite's declarations |
+| The pools table pushed the page sideways on a phone | It now scrolls inside its card; checked at 375 px wide (page width = screen width) and 1024 px |
+| A warm call showed "VM ready 0.0 ms" | There is no VM start in a warm call; the panel now hides VM ready, upload and import for warm calls |
+
+### 14.8 Tests
+
+```bash
+make test       # new: events (tenant filter, a full subscriber never blocks Publish, lag flag, cancel, close,
+                # concurrency), pool (OnStateChange: a VM's whole life in order with PrevID, prewarm, failed
+                # create, 20 goroutines: every VM destroyed exactly once), api (401 without key, 404 without a hub,
+                # hello first, vm event with function name and prev_id, invoke event with timings, other tenant
+                # sees nothing, function deployed after hello, stream ends on hub.Close and on client hang-up,
+                # /api/v1/node counts and memory with fake /proc), beevmd (/ui/ files, app fallback, missing
+                # asset 404, cache headers, /ui redirect, not mounted without index.html)
+make test-ui    # Vitest, 15 tests: SSE parser (chunks cut anywhere, comments, CRLF, multi-line data), timing
+                # headers, error text, reducer (pending -> real ID, destroyed, call history limit), pools,
+                # calls per second, percentiles, formatting
+make test-kvm   # 316 passing, new TestE2EEvents: real warm pool, the stream shows restoring busy idle busy idle
+                # recycling destroyed for one VM and invoke events restore then warm with cold-start timing
+```
+
+Not checked: the stream with `--isolation jailer` (the hook does not depend on the isolation mode, and memory reading needs root as in 13.8), a browser other than the Claude desktop app's (Chromium), and very long sessions (the page keeps the last 600 calls).
+
+---
+
 ## Appendix A: command cheat sheet
 
 All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
@@ -1957,6 +2078,10 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 | `./bin/beevmd bench load --fn A[,B…] [--rate 20] [--duration 1m] [--concurrency 8] [--out DIR]` | milestone 10: send calls to a running server at a fixed rate (needs `BEEVM_API_KEY`) |
 | `make monitoring` / `make monitoring-up` / `make monitoring-down` | milestone 10 (optional): Prometheus :9090 + Grafana :3000 (dashboard "BeeVM"), pinned binaries or Docker Compose |
 | `curl -s 127.0.0.1:8080/metrics \| grep ^beevm_` | milestone 10: the raw metrics |
+| `make ui` / `make ui-dev` / `make test-ui` | milestone 11 (optional): build the dashboard into `web/dist` (served at http://127.0.0.1:8080/ui/), Vite dev server on :5173, dashboard tests |
+| `./bin/beevmd serve … [--ui-dir DIR]` | milestone 11: folder of the built dashboard (default `web/dist`; empty = off) |
+| `curl -N -H "Authorization: Bearer $BEEVM_API_KEY" 127.0.0.1:8080/api/v1/events` | milestone 11: the live event stream (`hello`, `vm`, `invoke`) |
+| `curl -s -H "Authorization: Bearer $BEEVM_API_KEY" 127.0.0.1:8080/api/v1/node` | milestone 11: node density (VMs per state, memory) |
 | `make minio` / `make minio-up` / `make minio-down` | milestone 5: local S3 server (built from source) or via Docker Compose |
 | `set -a; . deploy/minio.env; set +a` | load the S3 settings and dev credentials into this terminal |
 | `make test` / `make test-kvm` / `make test-s3` / `make vet` | Go tests and checks (`test-s3` needs MinIO running) |
@@ -1986,6 +2111,8 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 | prometheus/client_golang | v1.25.0 | `go.mod` |
 | Prometheus (optional) | 3.15.1 (3.16.0 was one day old) | `scripts/common.sh`, `deploy/docker-compose.yml` |
 | Grafana OSS (optional) | 13.3.0 | `scripts/common.sh`, `deploy/docker-compose.yml` |
+| Node.js (host, dashboard build only) | 24.22.2 (checksum) | `scripts/common.sh` |
+| React / Recharts / Vite / TypeScript / Vitest (dashboard) | 19.3.1 / 3.10.1 / 8.3.4 / 6.0.3 / 5.0.5 | `web/package.json`, `web/package-lock.json` |
 | Guest agent | 0.1.0 | `cmd/beevm-agent/main.go` |
 | Host | Windows 11, WSL2 Ubuntu 24.04.3, WSL kernel 6.6.87 | — |
 
@@ -2040,6 +2167,10 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 | Cold start from a function snapshot under load, VM ready p50 / p99 (Prometheus) | 45.7 / ~85 ms | 10 |
 | Memory per idle VM, 6 VMs of one function: PSS / RSS | 6.2 / 22.1 MiB | 10 |
 | Memory per idle VM, 3 VMs of different functions: PSS / RSS | 48 / 50 MiB | 10 |
+| Load run with the dashboard open, 20 calls/s, all warm, round trip p50 / p99 | 3.0 / 12.0 ms | 11 |
+| Cold starts at 1 call/s with 2 s keep-alive, VM ready p50 / p99 (dashboard, 27 restores) | 47 / 103 ms | 11 |
+| Server shutdown with an event stream open | 108 ms | 11 |
+| Dashboard bundle (JavaScript, gzip) / build time | 183 kB / ~1 s | 11 |
 
 ## Appendix D: general troubleshooting
 
@@ -2059,6 +2190,9 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 14. **Calls are never `warm` (always `restore`):** check the server runs with `--runner warm` (the default), that calls come faster than `--keep-alive`, and that nothing redeployed the function in between (a redeploy throws its VMs away). Timeouts and agent errors also replace the VM on purpose. `beevm vms` shows what the pool holds.
 15. **The first `go vet` / `go test` takes minutes:** Go is compiling everything over the Windows-mounted folder (`/mnt/c`). Later runs use the build cache and are fast. Run long commands in the background or with a long timeout.
 16. **Grafana shows "No data":** is `beevmd serve` running on `127.0.0.1:8080` (Prometheus' target)? Check http://127.0.0.1:9090/targets; the target must be UP. Panels need a few calls first (rates and quantiles need two scrapes). The logs are in `~/.beevm/monitoring/logs/`.
+
+17. **`/ui/` answers 404:** the dashboard is not built (`make ui`), or `serve` was started from another folder (`--ui-dir` is relative: run it from the repo folder or pass the full path). The server's start-up log says `ui=true` when it is served.
+18. **The dashboard says "reconnecting…":** beevmd is not running or restarted; the page reconnects by itself (backoff up to 10 s). It goes back to the key form only when the key is rejected (401).
 
 ## Appendix E: regenerating these documents
 

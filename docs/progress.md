@@ -17,7 +17,7 @@ Details of each milestone: `docs/milestones.md`.
 | 8 | Python and Node.js runtimes, function snapshots | Done (Python 3.14 / Node 24; cold start from a function snapshot p50 58 ms Python, 85 ms Node, 73 ms binary) |
 | 9 | Isolation and networking | Done (6/6 attacks contained, `make test-isolation`; jailer + network cost +3.8 ms on VM ready p50; guest hardening +7 ms on the first call after a restore) |
 | 10 | Observability (optional module) | Done (`/metrics` with latency histograms per start kind and snapshot tier, VMs per state, memory per VM as PSS; `make monitoring` = Prometheus + Grafana dashboard without Docker; `beevmd bench load`) |
-| 11 | Web dashboard (optional module) | Not started |
+| 11 | Web dashboard (optional module) | Done (`/ui/`: live VM grid, invoke with timings, cold vs warm chart, density; new core `GET /api/v1/events` (SSE) and `GET /api/v1/node`; `make ui` with Node 24 pinned in WSL) |
 | 12 | Benchmarks and density | Not started |
 | 13 | Cloud run, report and demo | Not started |
 
@@ -269,3 +269,27 @@ Status values: Not started · In progress · Done · Done, needs refinement (say
 - **Not done / not verified:** memory reading for jailed VMs (needs `sudo`, not run; root can read every `smaps_rollup`), the Compose profile (no Docker), prewarmed VMs are not in `beevm_vm_ready_seconds` (documented), a new function's first call is missing from its rate.
 - **Refine later:** prewarm cold starts in the ready histogram (a runner-side hook), exemplars/trace ids, an alert rule for p99 > 50 ms, Grafana panels per tenant.
 - **Next:** milestone 12 (benchmarks and density), using `bench load` and the PSS metrics; or M11 (web dashboard).
+
+### 2026-11-06: Milestone 11 (web dashboard)
+- **Plan:** `C:\Users\ommga\.claude\plans\read-md-files-and-enchanted-crayon.md`. Agreed with the user: a **real SSE endpoint in the core API** (read with `fetch` so the key stays in the `Authorization` header), **Node 24 pinned in WSL** (like `make monitoring`), **`beevmd bench load`** for the live check (k6 stays in M12), **plain CSS** (no Tailwind). Full write-up: `developer-guide/guide.md` Part 14.
+- **Core (Go, all additive):**
+  - `internal/events` (new): publish/subscribe hub. `Publish` never blocks (it runs under the pool lock); 256-event buffer per subscriber, overflow drops and marks the subscriber lagged; `Close` ends every stream.
+  - `internal/pool`: `Config.OnStateChange func(StateChange)` (`VM VMInfo, From, PrevID`), called from `mustMove` (every move) and once when a VM is reserved; `PrevID` when `pending-N` got its real ID. `calls`/`lastUsed` are now updated before the move so the report shows the new values. `infoLocked` shared with `Stats`.
+  - `internal/api`: `Deps.Events`; `GET /api/v1/events` (key group; `hello` = caller's VMs + `max_vms` first and again after lag, `vm`, `invoke`, `: ping` every 15 s; subscribe before reading the state); `invoke` events published next to the metrics in the request middleware; `GET /api/v1/node` (`max_vms`, `vms`, `tenant_vms`, per-state counts of the whole node, PSS/RSS sums, node memory); `api.VMEvents(hub)`. Types in `apitypes` (`Hello`, `InvokeEvent`, `Node`, `VM.PrevID`). `metrics.ReadProcessMemory`/`ReadNodeMemory` exported (collector unchanged).
+  - `cmd/beevmd serve`: hub + pool hook, `--ui-dir` (default `web/dist`; `cmd/beevmd/ui.go`: `/ui/` files, app fallback to `index.html`, missing asset 404, immutable cache for hashed assets, `/ui` redirect; logs "web dashboard not built" otherwise), `srv.RegisterOnShutdown(hub.Close)`, `ui` in the listening line. No `go:embed`.
+- **Dashboard (`web/`, optional):** React 19.3.1, Recharts 3.10.1, Vite 8.3.4, TypeScript 6.0.3, Vitest 5.0.5 (exact versions, lockfile committed; each >= 3 weeks old). `src/sse.ts` (own SSE parser over `fetch`, reconnect 0.5-10 s, stop on 401), `src/state.ts` (reducer), `src/api.ts`, `src/stats.ts`, components: density tiles, VM grid (state colour + letter, flash on call, other tenants' VMs and free slots), Invoke panel (start kind, snapshot, VM ready/upload/import/function/total/round trip), latency scatter (log scale, 50 ms line, p50/p99 table incl. VM ready), warm pools with Prewarm. Colours: blue = restoring/restore, aqua = idle/warm, orange = busy/boot (validated for colour blindness in light and dark; text labels everywhere). Key in `sessionStorage` (or `localStorage` with "remember").
+- **Tooling:** `HOST_NODE_VERSION=24.22.2` + checksum in `scripts/common.sh`; `scripts/ui.sh install|build|dev|test` (Node into `~/.beevm/node-24.22.2`, `npm ci` only when the lockfile changed, polling for the dev server on `/mnt/c`); Makefile block `ui`, `ui-dev`, `test-ui`.
+- **Verified:** `make test` (new: events 4, pool hook 3, api events/node 7, beevmd ui 2; `-race` for events/pool/api/beevmd), `go vet` (also `-tags kvm`), gofmt; `make test-ui` 15 passing; `make ui` (type check + build, 183 kB gzip); `make test-kvm` **316 passing** (new `TestE2EEvents`: stream shows `restoring busy idle busy idle recycling destroyed` and invoke events `restore`, `warm`). **Swappability:** with `web/` renamed away, `make build`, `go test ./...` and `serve` work (log "web dashboard not built", `/ui/` 404). Checked in the browser at 1024 px and 375 px (no sideways scroll), light and dark.
+- **Live run** (throw-away `BEEVM_HOME`, `--max-vms 6`, three hello functions, dashboard open; raw: `bench/results/m11/`):
+
+  | Phase | Calls | Round trip p50 / p90 / p99 (ms) | Dashboard |
+  |---|---|---|---|
+  | keep-alive 60 s, 20/s for 1 min | 1,200 ok, all warm | 3.0 / 5.8 / 12.0 | 22 calls/s, warm p50 2.2 / p99 7.9 ms server time |
+  | keep-alive 2 s, 1/s for 1 min | 60 ok, all restore (function snapshot) | 83.8 / 112.3 / 148.7 | **VM ready p50 47 ms, p99 103 ms**; tiles come and go |
+  | Prewarm 3 x hello-python from the page | | | **PSS 7.3 vs RSS 18 MiB per VM** |
+
+  Ctrl-C with the stream open: stopped in 108 ms, no VM left; the page reconnected by itself after the restart.
+- **Learned / fixed:** a polled counter and a live event list disagree during churn ("1 VM of other tenants" with one tenant): `/api/v1/node` now returns `tenant_vms` from the same moment; `Shutdown` waits for open SSE streams forever unless they are closed on shutdown; Recharts' generic tooltip types do not fit hand-typed props; TypeScript needs `vite/client` types for CSS imports; the dataviz validator script needs an ES-module folder to run under Node 22 on Windows.
+- **Not done / not verified:** the stream with `--isolation jailer` (needs sudo; the hook does not depend on the mode), browsers other than the desktop app's Chromium (Firefox, Safari), very long sessions (page keeps the last 600 calls). Learning notes (`notes-data.js`) still stop at M7 (M8-M11 chapters missing).
+- **Refine later:** per-function latency filter in the chart, a "deploy" event so the function list needs no polling, show the tenant name (needs a `GET /api/v1/me`), code-split Recharts (bundle 613 kB before gzip), an alert when p99 > 50 ms.
+- **Next:** milestone 12 (benchmarks and density): k6, `bench/plot_results.py`, max idle VMs per node using the PSS numbers.

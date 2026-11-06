@@ -65,11 +65,58 @@ type VM struct {
 	LastUsed time.Time `json:"last_used"`
 	Calls    int64     `json:"calls"`
 	Addr     string    `json:"addr,omitempty"` // network address for the tenant's other VMs (isolated servers only)
+	// PrevID is only set in "vm" events: the VM had this ID before (a "pending-N" placeholder
+	// while it was being created). Replace that entry.
+	PrevID string `json:"prev_id,omitempty"`
 }
 
 // VMList is the answer to GET /api/v1/vms.
 type VMList struct {
 	VMs []VM `json:"vms"`
+}
+
+// Event stream (GET /api/v1/events, Server-Sent Events). Each message has an "event:" line
+// with one of these names and a "data:" line with JSON:
+const (
+	EventHello  = "hello"  // Hello: the full picture; sent first, and again if the stream fell behind
+	EventVM     = "vm"     // VM: one VM changed state (State "destroyed" = remove it)
+	EventInvoke = "invoke" // InvokeEvent: a call finished
+)
+
+// Hello is the "hello" event: the caller's VMs right now.
+type Hello struct {
+	VMs    []VM `json:"vms"`
+	MaxVMs int  `json:"max_vms"` // VMs on the whole node at most (0 = no warm pool)
+}
+
+// InvokeEvent is the "invoke" event: one finished call of a deployed function.
+type InvokeEvent struct {
+	Function   string    `json:"function"`
+	Runtime    string    `json:"runtime"`
+	Status     int       `json:"status"` // HTTP status of the call
+	Start      string    `json:"start,omitempty"`
+	Snapshot   string    `json:"snapshot,omitempty"`
+	VMID       string    `json:"vm,omitempty"`
+	BootMS     int64     `json:"boot_ms"`
+	UploadMS   int64     `json:"upload_ms"`
+	LoadMS     int64     `json:"load_ms"`
+	FunctionMS int64     `json:"function_ms"`
+	DurationMS float64   `json:"duration_ms"` // whole request inside the server, µs precision
+	At         time.Time `json:"at"`          // when it finished
+}
+
+// Node is the answer to GET /api/v1/node: how full this node is. It counts every tenant's VMs
+// (numbers only, no names), because density is a property of the node.
+type Node struct {
+	MaxVMs            int            `json:"max_vms"`
+	VMs               int            `json:"vms"`
+	TenantVMs         int            `json:"tenant_vms"`   // of VMs, the caller's own (counted at the same moment)
+	States            map[string]int `json:"states"`       // restoring, idle, busy, recycling
+	MeasuredVMs       int            `json:"measured_vms"` // VMs whose memory could be read
+	PSSBytes          uint64         `json:"pss_bytes"`    // summed over the measured VMs
+	RSSBytes          uint64         `json:"rss_bytes"`    // summed; shared pages counted in every VM
+	MemTotalBytes     uint64         `json:"mem_total_bytes"`
+	MemAvailableBytes uint64         `json:"mem_available_bytes"`
 }
 
 // Error is the body of every error answer. For a failed function (HTTP 502) ExitCode and

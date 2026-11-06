@@ -3,7 +3,7 @@ BEEVM_HOME ?= $(HOME)/.beevm
 export BEEVM_HOME
 GO ?= /usr/local/go/bin/go
 
-.PHONY: help setup images kernel rootfs rootfs-python rootfs-node boot boot-test clean-images build examples test test-kvm test-isolation test-s3 vet minio minio-up minio-down monitoring monitoring-up monitoring-down
+.PHONY: help setup images kernel rootfs rootfs-python rootfs-node boot boot-test clean-images build examples test test-kvm test-isolation test-s3 vet minio minio-up minio-down monitoring monitoring-up monitoring-down ui ui-dev test-ui
 
 help:
 	@echo "make setup        one-time install (Go, Firecracker, kernel, rootfs); needs sudo"
@@ -19,6 +19,7 @@ help:
 	@echo "make minio        build (first time) and run a local MinIO S3 server, no Docker"
 	@echo "make minio-up     same, with Docker Compose (minio-down stops it)"
 	@echo "make monitoring   (optional) run Prometheus :9090 + Grafana :3000 for beevmd, no Docker"
+	@echo "make ui           (optional) build the web dashboard (web/dist, served at /ui/); ui-dev, test-ui"
 	@echo "make vet          go vet"
 	@echo "make clean-images delete images and run folders in $(BEEVM_HOME)"
 
@@ -96,3 +97,14 @@ monitoring-up:
 
 monitoring-down:
 	docker compose -f deploy/docker-compose.yml --profile monitoring stop prometheus grafana
+
+# Optional module (M11): web dashboard. Delete this block, scripts/ui.sh and web/ to remove it;
+# nothing else depends on them (beevmd serve then just has no /ui/).
+ui:
+	bash scripts/ui.sh build
+
+ui-dev:
+	bash scripts/ui.sh dev
+
+test-ui:
+	bash scripts/ui.sh test

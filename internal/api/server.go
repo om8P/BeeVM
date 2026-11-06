@@ -21,6 +21,7 @@ import (
 	"github.com/om8P/BeeVM/internal/agentproto"
 	"github.com/om8P/BeeVM/internal/apitypes"
 	"github.com/om8P/BeeVM/internal/codestore"
+	"github.com/om8P/BeeVM/internal/events"
 	"github.com/om8P/BeeVM/internal/metrics"
 	"github.com/om8P/BeeVM/internal/registry"
 	"github.com/om8P/BeeVM/internal/runner"
@@ -34,6 +35,7 @@ type Deps struct {
 	Runner          runner.Runner
 	Logger          *slog.Logger
 	Metrics         *metrics.Metrics // optional: nil = no /metrics and nothing recorded
+	Events          *events.Hub      // optional: nil = no /api/v1/events stream
 	MaxUploadBytes  int64
 	MaxPayloadBytes int64
 }
@@ -80,6 +82,10 @@ func (s *Server) Handler() http.Handler {
 			r.Post("/{name}/prewarm", s.prewarm)
 		})
 		r.Get("/api/v1/vms", s.listVMs)
+		r.Get("/api/v1/node", s.nodeInfo)
+		if s.Events != nil {
+			r.Get("/api/v1/events", s.streamEvents)
+		}
 		r.Post("/invoke/{name}", s.invoke)
 	})
 	return r
@@ -96,11 +102,12 @@ const (
 
 // reqInfo is filled in as a request moves along, and logged at the end.
 type reqInfo struct {
-	tenant  string
-	vmID    string
-	cache   string // "hit" or "miss" for invoke calls
-	start   string // "warm", "restore" or "boot" for invoke calls
-	fetchMS int64
+	tenant   string
+	tenantID int64
+	vmID     string
+	cache    string // "hit" or "miss" for invoke calls
+	start    string // "warm", "restore" or "boot" for invoke calls
+	fetchMS  int64
 
 	// invoke calls of a deployed function (set once the function was found)
 	function string
@@ -176,6 +183,7 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 		s.Logger.Info("request", attrs...)
 		if info.function != "" {
 			s.observeInvoke(info, status, took)
+			s.publishInvoke(info, status, took)
 		}
 	})
 }
@@ -225,7 +233,8 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			writeError(w, http.StatusInternalServerError, "internal error")
 			return
 		}
-		infoFrom(r.Context()).tenant = tenant.Name
+		info := infoFrom(r.Context())
+		info.tenant, info.tenantID = tenant.Name, tenant.ID
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), tenantKey, tenant)))
 	})
 }

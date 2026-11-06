@@ -62,3 +62,9 @@ export PROMETHEUS_VERSION="3.15.1"
 export PROMETHEUS_SHA256="6a726885328ad9efebbf36e876ce2fb6225468a71fd1e7ce3ba666d5f4d97a84"
 export GRAFANA_VERSION="13.3.0"
 export GRAFANA_SHA256="cec8f98cc59bc1a1945833b652371a073be678c5c159a9b1695ad63c04fae5a7"
+
+# Web dashboard (M11, optional; checked 2026-11-06): Node.js for the host, only to build web/
+# (React + Vite). Not the guest's Node (NODE_PKGS above comes from Alpine). 24.x is the LTS line
+# the project uses; 24.22.2 is from 2026-10-27.
+export HOST_NODE_VERSION="24.22.2"
+export HOST_NODE_SHA256="48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75"

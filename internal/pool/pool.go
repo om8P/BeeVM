@@ -63,6 +63,18 @@ type Config struct {
 	// RecycleReason). It is called with the pool's lock held: it must be quick and must not
 	// call the pool (incrementing a metric is fine).
 	OnRecycle func(reason string)
+	// OnStateChange (optional, M11) is told about every VM state change, for live views such as
+	// the dashboard's event stream. Same rule as OnRecycle: called with the lock held, so it
+	// must be quick and must not call the pool (handing the value to a channel is fine).
+	OnStateChange func(StateChange)
+}
+
+// StateChange describes one move of one VM. A new VM is reported once with From and VM.State
+// both Restoring. VM.State is Destroyed for its last report.
+type StateChange struct {
+	VM     VMInfo
+	From   State
+	PrevID string // set when the VM's ID changed since its last report ("pending-N" -> real ID)
 }
 
 // Short recycle reasons, for metrics labels.
@@ -138,6 +150,7 @@ type vmEntry struct {
 	calls    int64
 	drained  bool          // throw away instead of keeping when released
 	gone     chan struct{} // closed when Destroyed
+	reported string        // the ID OnStateChange last saw (to report "pending-N" -> real ID)
 }
 
 // Pool is a set of per-function warm VMs sharing one node-wide limit.
@@ -207,11 +220,40 @@ func (p *Pool) usedLocked() int {
 }
 
 // mustMove is move for transitions the pool's own logic guarantees; an error is a bug.
+// Callers update calls and lastUsed before moving, so the change report shows the new values.
 func (p *Pool) mustMove(e *vmEntry, to State) {
+	from := e.state
 	if err := e.move(to); err != nil {
 		panic(err)
 	}
 	e.since = p.cfg.Now()
+	p.notifyLocked(e, from)
+}
+
+// notifyLocked tells OnStateChange about e's current state.
+func (p *Pool) notifyLocked(e *vmEntry, from State) {
+	if p.cfg.OnStateChange == nil {
+		return
+	}
+	c := StateChange{VM: infoLocked(e), From: from}
+	if e.reported != "" && e.reported != e.id {
+		c.PrevID = e.reported
+	}
+	e.reported = e.id
+	p.cfg.OnStateChange(c)
+}
+
+// infoLocked describes one VM.
+func infoLocked(e *vmEntry) VMInfo {
+	info := VMInfo{ID: e.id, TenantID: e.key.TenantID, FunctionID: e.key.FunctionID,
+		CodeSHA256: e.key.CodeSHA256, State: e.state, Since: e.since, LastUsed: e.lastUsed, Calls: e.calls}
+	if a, ok := e.inst.(Addresser); ok {
+		info.Addr = a.Addr()
+	}
+	if p, ok := e.inst.(PIDer); ok {
+		info.PID = p.PID()
+	}
+	return info
 }
 
 // Acquire returns a VM for key: an idle one if there is one (warm), otherwise a new one made
@@ -227,8 +269,8 @@ func (p *Pool) Acquire(ctx context.Context, key Key, create CreateFunc) (*Lease,
 		}
 		// 1. Warm hit.
 		if e := p.newestIdleLocked(key); e != nil {
-			p.mustMove(e, Busy)
 			e.calls++
+			p.mustMove(e, Busy)
 			p.mu.Unlock()
 			return &Lease{Instance: e.inst, Warm: true, e: e}, nil
 		}
@@ -270,6 +312,7 @@ func (p *Pool) reserveLocked(key Key) *vmEntry {
 	e := &vmEntry{id: fmt.Sprintf("pending-%d", p.pending), key: key, state: Restoring,
 		since: now, lastUsed: now, gone: make(chan struct{})}
 	p.vms[e] = struct{}{}
+	p.notifyLocked(e, Restoring)
 	return e
 }
 
@@ -295,11 +338,11 @@ func (p *Pool) finishCreate(ctx context.Context, e *vmEntry, create CreateFunc, 
 		}
 		return nil, fmt.Errorf("function changed while its VM was being created")
 	}
-	p.mustMove(e, to)
 	e.lastUsed = p.cfg.Now()
 	if to == Busy {
 		e.calls++
 	}
+	p.mustMove(e, to)
 	p.broadcastLocked()
 	p.mu.Unlock()
 
@@ -354,8 +397,8 @@ func (p *Pool) Release(l *Lease, healthy bool) {
 	case p.closed:
 		p.recycleLocked(e, "pool closing")
 	default:
-		p.mustMove(e, Idle)
 		e.lastUsed = p.cfg.Now()
+		p.mustMove(e, Idle)
 		p.broadcastLocked()
 	}
 }
@@ -498,15 +541,7 @@ func (p *Pool) Stats(tenantID int64) []VMInfo {
 		if tenantID > 0 && e.key.TenantID != tenantID {
 			continue
 		}
-		info := VMInfo{ID: e.id, TenantID: e.key.TenantID, FunctionID: e.key.FunctionID,
-			CodeSHA256: e.key.CodeSHA256, State: e.state, Since: e.since, LastUsed: e.lastUsed, Calls: e.calls}
-		if a, ok := e.inst.(Addresser); ok && e.inst != nil {
-			info.Addr = a.Addr()
-		}
-		if p, ok := e.inst.(PIDer); ok && e.inst != nil {
-			info.PID = p.PID()
-		}
-		out = append(out, info)
+		out = append(out, infoLocked(e))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
