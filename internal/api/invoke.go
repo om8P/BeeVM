@@ -41,6 +41,12 @@ func (s *Server) invoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	info := infoFrom(r.Context())
+	info.function, info.runtime = f.Name, f.Runtime
+	if info.runtime == "" {
+		info.runtime = "binary"
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, s.MaxPayloadBytes)
 	payload, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -67,7 +73,6 @@ func (s *Server) invoke(w http.ResponseWriter, r *http.Request) {
 	if cacheHit {
 		fetchMS = 0
 	}
-	info := infoFrom(r.Context())
 	info.cache = "hit"
 	if !cacheHit {
 		info.cache = "miss"
@@ -88,6 +93,7 @@ func (s *Server) invoke(w http.ResponseWriter, r *http.Request) {
 	res, err := s.Runner.Run(r.Context(), req)
 	info.vmID = res.VMID
 	info.start = res.StartKind
+	info.result = &res
 	switch {
 	case errors.Is(err, runner.ErrBusy):
 		w.Header().Set("Retry-After", "1")

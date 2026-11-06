@@ -3,7 +3,7 @@ BEEVM_HOME ?= $(HOME)/.beevm
 export BEEVM_HOME
 GO ?= /usr/local/go/bin/go
 
-.PHONY: help setup images kernel rootfs rootfs-python rootfs-node boot boot-test clean-images build examples test test-kvm test-isolation test-s3 vet minio minio-up minio-down
+.PHONY: help setup images kernel rootfs rootfs-python rootfs-node boot boot-test clean-images build examples test test-kvm test-isolation test-s3 vet minio minio-up minio-down monitoring monitoring-up monitoring-down
 
 help:
 	@echo "make setup        one-time install (Go, Firecracker, kernel, rootfs); needs sudo"
@@ -18,6 +18,7 @@ help:
 	@echo "make test-s3     store tests against a real MinIO (start make minio first)"
 	@echo "make minio        build (first time) and run a local MinIO S3 server, no Docker"
 	@echo "make minio-up     same, with Docker Compose (minio-down stops it)"
+	@echo "make monitoring   (optional) run Prometheus :9090 + Grafana :3000 for beevmd, no Docker"
 	@echo "make vet          go vet"
 	@echo "make clean-images delete images and run folders in $(BEEVM_HOME)"
 
@@ -84,3 +85,14 @@ vet:
 
 clean-images:
 	rm -rf $(BEEVM_HOME)/images $(BEEVM_HOME)/run
+
+# Optional module (M10): Prometheus + Grafana. Delete this block, scripts/monitoring.sh and
+# deploy/monitoring/ to remove it; nothing else depends on them.
+monitoring:
+	bash scripts/monitoring.sh run
+
+monitoring-up:
+	docker compose -f deploy/docker-compose.yml --profile monitoring up -d prometheus grafana
+
+monitoring-down:
+	docker compose -f deploy/docker-compose.yml --profile monitoring stop prometheus grafana

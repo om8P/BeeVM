@@ -77,6 +77,15 @@ func (w *warmVM) Addr() string {
 	}
 	return ""
 }
+
+// PID implements pool.PIDer: the Firecracker process, for memory metrics.
+func (w *warmVM) PID() int {
+	if w.vm == nil {
+		return 0
+	}
+	return w.vm.PID()
+}
+
 func (w *warmVM) Exited() <-chan struct{} { return w.exited }
 func (w *warmVM) Destroy()                { w.destroy() }
 

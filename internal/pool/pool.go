@@ -59,6 +59,40 @@ type Config struct {
 	QueueWait time.Duration // how long a call waits for a free slot before ErrBusy; default 5 s
 	Now       func() time.Time
 	Logger    *slog.Logger
+	// OnRecycle (optional) is told every time a VM is thrown away, with a short reason (see
+	// RecycleReason). It is called with the pool's lock held: it must be quick and must not
+	// call the pool (incrementing a metric is fine).
+	OnRecycle func(reason string)
+}
+
+// Short recycle reasons, for metrics labels.
+const (
+	ReasonKeepAlive = "keep_alive" // idle longer than KeepAlive
+	ReasonEvicted   = "evicted"    // node full, least recently used idle VM
+	ReasonUnhealthy = "unhealthy"  // timed out, agent error, caller hung up
+	ReasonDrained   = "drained"    // function redeployed or deleted
+	ReasonClosing   = "closing"    // pool shutting down
+	ReasonExited    = "exited"     // the VM's process ended by itself
+	ReasonOther     = "other"
+)
+
+// RecycleReason maps the reason text the pool logs to its short label.
+func RecycleReason(text string) string {
+	switch text {
+	case "keep-alive expired":
+		return ReasonKeepAlive
+	case "evicted (node full)":
+		return ReasonEvicted
+	case "unhealthy after a call":
+		return ReasonUnhealthy
+	case "function changed or removed":
+		return ReasonDrained
+	case "pool closing":
+		return ReasonClosing
+	case "vm process exited":
+		return ReasonExited
+	}
+	return ReasonOther
 }
 
 // Lease is a VM handed to one call. Give it back with Release.
@@ -81,11 +115,17 @@ type VMInfo struct {
 	LastUsed   time.Time // when its last call ended (creation time if never used)
 	Calls      int64
 	Addr       string // its network address for its tenant's other VMs ("" without networking)
+	PID        int    // its Firecracker process (0 while being created, or unknown)
 }
 
 // Addresser is an Instance with a network address (optional).
 type Addresser interface {
 	Addr() string
+}
+
+// PIDer is an Instance that knows its host process id (optional; used for memory metrics).
+type PIDer interface {
+	PID() int
 }
 
 type vmEntry struct {
@@ -325,6 +365,9 @@ func (p *Pool) Release(l *Lease, healthy bool) {
 func (p *Pool) recycleLocked(e *vmEntry, reason string) {
 	p.mustMove(e, Recycling)
 	p.cfg.Logger.Info("recycling vm", "vm", e.id, "function_id", e.key.FunctionID, "reason", reason)
+	if p.cfg.OnRecycle != nil {
+		p.cfg.OnRecycle(RecycleReason(reason))
+	}
 	p.broadcastLocked()
 	p.destroys.Add(1)
 	go func() {
@@ -459,6 +502,9 @@ func (p *Pool) Stats(tenantID int64) []VMInfo {
 			CodeSHA256: e.key.CodeSHA256, State: e.state, Since: e.since, LastUsed: e.lastUsed, Calls: e.calls}
 		if a, ok := e.inst.(Addresser); ok && e.inst != nil {
 			info.Addr = a.Addr()
+		}
+		if p, ok := e.inst.(PIDer); ok && e.inst != nil {
+			info.PID = p.PID()
 		}
 		out = append(out, info)
 	}

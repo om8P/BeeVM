@@ -54,10 +54,11 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  boot     start one MicroVM, show its console, stop it and clean up")
 	fmt.Fprintln(os.Stderr, "  invoke   boot (or --restore) a VM, upload a function binary, run it (repeatedly), clean up")
 	fmt.Fprintln(os.Stderr, "  serve    run the HTTP API (deploy and invoke functions)")
-	fmt.Fprintln(os.Stderr, "  tenant   add |snapshot build [--runtime R] | ls | rm <key> | rm --stale   (snapshots for fast restore)  (manage customers; prints a new API key on add)")
+	fmt.Fprintln(os.Stderr, "  tenant   add | ls   (manage customers; prints a new API key on add)")
 	fmt.Fprintln(os.Stderr, "  key      add | ls | revoke   (manage API keys)")
-	fmt.Fprintln(os.Stderr, "  snapshot build | ls | rm <key> | rm --stale   (base snapshots for fast restore)")
+	fmt.Fprintln(os.Stderr, "  snapshot build [--runtime R] | ls | rm <key> | rm --stale   (snapshots for fast restore)")
 	fmt.Fprintln(os.Stderr, "  bench    coldstart   (measure boot vs snapshot restore, p50/p99)")
+	fmt.Fprintln(os.Stderr, "  bench    load        (send calls to a running server at a fixed rate; watch Grafana)")
 }
 
 // vmConfig builds the VM config shared by the subcommands.

@@ -22,5 +22,36 @@ services:
       timeout: 3s
       retries: 10
 
+
+  # Optional module (M10): Prometheus + Grafana. `make monitoring-up` (or `docker compose
+  # -f deploy/docker-compose.yml --profile monitoring up -d`). Host networking so the same
+  # prometheus.yml (127.0.0.1:8080) works. NOT TESTED (no Docker on the dev machine); the
+  # tested path is `make monitoring` (pinned binaries). Image tags match scripts/common.sh.
+  prometheus:
+    profiles: [monitoring]
+    image: prom/prometheus:v3.15.1
+    network_mode: host
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.listen-address=127.0.0.1:9090
+      - --storage.tsdb.retention.time=2d
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    profiles: [monitoring]
+    image: grafana/grafana:13.3.0
+    network_mode: host
+    environment:
+      BEEVM_DASHBOARDS: /var/lib/grafana/dashboards
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/beevm.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
 volumes:
   minio-data:

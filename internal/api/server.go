@@ -21,6 +21,7 @@ import (
 	"github.com/om8P/BeeVM/internal/agentproto"
 	"github.com/om8P/BeeVM/internal/apitypes"
 	"github.com/om8P/BeeVM/internal/codestore"
+	"github.com/om8P/BeeVM/internal/metrics"
 	"github.com/om8P/BeeVM/internal/registry"
 	"github.com/om8P/BeeVM/internal/runner"
 )
@@ -32,6 +33,7 @@ type Deps struct {
 	Code            *codestore.Store
 	Runner          runner.Runner
 	Logger          *slog.Logger
+	Metrics         *metrics.Metrics // optional: nil = no /metrics and nothing recorded
 	MaxUploadBytes  int64
 	MaxPayloadBytes int64
 }
@@ -56,7 +58,13 @@ func New(d Deps) *Server {
 // Handler returns the HTTP handler with all routes.
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
-	r.Use(s.logRequests, s.recoverPanics)
+	r.Use(middleware.RequestID, s.logRequests, s.recoverPanics)
+
+	// Prometheus scrapes this. No API key: it shows tenant and function names, so keep the
+	// server on localhost (the default) or behind a firewall.
+	if s.Metrics != nil {
+		r.Method(http.MethodGet, "/metrics", s.Metrics.Handler())
+	}
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -93,6 +101,11 @@ type reqInfo struct {
 	cache   string // "hit" or "miss" for invoke calls
 	start   string // "warm", "restore" or "boot" for invoke calls
 	fetchMS int64
+
+	// invoke calls of a deployed function (set once the function was found)
+	function string
+	runtime  string
+	result   *runner.Result // set once the runner returned
 }
 
 func tenantFrom(ctx context.Context) registry.Tenant {
@@ -139,9 +152,13 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 		if status == 0 {
 			status = http.StatusOK
 		}
+		took := time.Since(start)
 		attrs := []any{
-			"method", r.Method, "path", r.URL.Path, "tenant", info.tenant,
-			"status", status, "duration_ms", time.Since(start).Milliseconds(), "vm", info.vmID,
+			"method", r.Method, "path", r.URL.Path, "request_id", middleware.GetReqID(r.Context()), "tenant", info.tenant,
+			"status", status, "duration_ms", took.Milliseconds(), "vm", info.vmID,
+		}
+		if info.function != "" {
+			attrs = append(attrs, "function", info.function, "runtime", info.runtime)
 		}
 		if info.cache != "" {
 			attrs = append(attrs, "code_cache", info.cache, "fetch_ms", info.fetchMS)
@@ -149,8 +166,32 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 		if info.start != "" {
 			attrs = append(attrs, "start", info.start)
 		}
+		if res := info.result; res != nil && res.StartKind != "" {
+			if res.Snapshot != "" {
+				attrs = append(attrs, "snapshot", res.Snapshot)
+			}
+			attrs = append(attrs, "boot_ms", res.BootMS, "upload_ms", res.UploadMS, "load_ms", res.LoadMS,
+				"function_ms", res.FunctionMS)
+		}
 		s.Logger.Info("request", attrs...)
+		if info.function != "" {
+			s.observeInvoke(info, status, took)
+		}
 	})
+}
+
+// observeInvoke records a finished /invoke call of a deployed function in the metrics (only
+// found functions: a name from the URL never becomes a label by itself).
+func (s *Server) observeInvoke(info *reqInfo, status int, d time.Duration) {
+	c := metrics.Invocation{
+		Tenant: info.tenant, Function: info.function, Runtime: info.runtime,
+		Status: metrics.StatusClass(status), Duration: d, CodeCache: info.cache,
+	}
+	if res := info.result; res != nil {
+		c.Start, c.Snapshot = res.StartKind, res.Snapshot
+		c.BootMS, c.UploadMS, c.LoadMS, c.FunctionMS = res.BootMS, res.UploadMS, res.LoadMS, res.FunctionMS
+	}
+	s.Metrics.ObserveInvoke(c)
 }
 
 // recoverPanics turns a crash inside a handler into a clean 500 instead of a dropped connection.

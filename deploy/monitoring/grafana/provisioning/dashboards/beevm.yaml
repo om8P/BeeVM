@@ -1,0 +1,9 @@
+apiVersion: 1
+providers:
+  - name: BeeVM
+    folder: ""
+    type: file
+    allowUiUpdates: true
+    options:
+      # Set by scripts/monitoring.sh (and by the Compose file) to deploy/monitoring/grafana/dashboards.
+      path: $BEEVM_DASHBOARDS
