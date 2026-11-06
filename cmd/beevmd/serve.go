@@ -54,6 +54,7 @@ func runServe(args []string) int {
 	s3Endpoint := fs.String("s3-endpoint", os.Getenv("BEEVM_S3_ENDPOINT"), "S3 endpoint URL for MinIO etc. (env BEEVM_S3_ENDPOINT); empty = AWS S3")
 	s3Region := fs.String("s3-region", envOr("BEEVM_S3_REGION", "us-east-1"), "S3 region (env BEEVM_S3_REGION)")
 	s3PathStyle := fs.Bool("s3-path-style", os.Getenv("BEEVM_S3_ENDPOINT") != "", "use path-style S3 URLs (needed for MinIO; default on when an endpoint is set)")
+	isoFlags := addIsolationFlags(fs)
 	_ = fs.Parse(args)
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -102,6 +103,23 @@ func runServe(args []string) int {
 	if err := os.MkdirAll(base.BaseDir, 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
+	}
+
+	// Isolation (--isolation jailer, needs sudo): every VM gets its own jail, UID and cgroup.
+	// Files root creates in BEEVM_HOME are given back to their owner, now (the database's
+	// journal files, so `beevmd tenant add` still works without sudo) and on exit.
+	iso, err := isoFlags.open(home, &base, logger, *maxVMs)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	defer closeIsolation(iso)
+	if iso != nil {
+		if _, err := iso.ChownBack(); err != nil {
+			logger.Warn("could not give files back to their owner", "error", err)
+		}
+		logger.Info("isolation on", "mode", iso.Name(), "cpu_limit_percent", *isoFlags.cpuPercent, "uid_base", *isoFlags.uidBase,
+			"egress", *isoFlags.egress)
 	}
 
 	// Runtimes: binaries always run; python and node need their image (make images).
@@ -205,7 +223,7 @@ func runServe(args []string) int {
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
-	logger.Info("listening", "addr", *addr, "max_vms", *maxVMs, "runner", *runnerKind, "keep_alive", keepAlive.String(), "runtimes", append([]string{agentproto.RuntimeBinary}, available...), "home", home)
+	logger.Info("listening", "addr", *addr, "max_vms", *maxVMs, "runner", *runnerKind, "keep_alive", keepAlive.String(), "runtimes", append([]string{agentproto.RuntimeBinary}, available...), "home", home, "isolation", *isoFlags.mode)
 
 	select {
 	case err := <-errCh:

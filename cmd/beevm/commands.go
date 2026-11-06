@@ -322,14 +322,18 @@ func newVMs(s *settings) *cobra.Command {
 				return nil
 			}
 			tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(tw, "VM\tFUNCTION\tSTATE\tFOR\tCALLS")
+			fmt.Fprintln(tw, "VM\tFUNCTION\tSTATE\tFOR\tCALLS\tADDRESS")
 			for _, v := range vms {
 				fn := v.Function
 				if fn == "" {
 					fn = "(removed)"
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\n", v.ID, fn, v.State,
-					time.Since(v.Since).Round(100*time.Millisecond), v.Calls)
+				addr := v.Addr
+				if addr == "" {
+					addr = "-"
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\n", v.ID, fn, v.State,
+					time.Since(v.Since).Round(100*time.Millisecond), v.Calls, addr)
 			}
 			return tw.Flush()
 		},

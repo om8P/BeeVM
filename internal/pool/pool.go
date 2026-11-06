@@ -80,6 +80,12 @@ type VMInfo struct {
 	Since      time.Time // when it entered State
 	LastUsed   time.Time // when its last call ended (creation time if never used)
 	Calls      int64
+	Addr       string // its network address for its tenant's other VMs ("" without networking)
+}
+
+// Addresser is an Instance with a network address (optional).
+type Addresser interface {
+	Addr() string
 }
 
 type vmEntry struct {
@@ -449,8 +455,12 @@ func (p *Pool) Stats(tenantID int64) []VMInfo {
 		if tenantID > 0 && e.key.TenantID != tenantID {
 			continue
 		}
-		out = append(out, VMInfo{ID: e.id, TenantID: e.key.TenantID, FunctionID: e.key.FunctionID,
-			CodeSHA256: e.key.CodeSHA256, State: e.state, Since: e.since, LastUsed: e.lastUsed, Calls: e.calls})
+		info := VMInfo{ID: e.id, TenantID: e.key.TenantID, FunctionID: e.key.FunctionID,
+			CodeSHA256: e.key.CodeSHA256, State: e.state, Since: e.since, LastUsed: e.lastUsed, Calls: e.calls}
+		if a, ok := e.inst.(Addresser); ok && e.inst != nil {
+			info.Addr = a.Addr()
+		}
+		out = append(out, info)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out

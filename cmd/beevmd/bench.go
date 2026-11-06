@@ -103,6 +103,8 @@ type benchSettings struct {
 	Settle    time.Duration // 0 = the normal snapshots; else a throw-away snapshot with this settle time
 	FCMetrics bool          // ask Firecracker for its own load time
 	Pin       []int         // restore: host CPUs for the firecracker process
+	Isolation string        // "none" or "jailer"
+	Isolator  vmm.Isolator  // set with --isolation jailer
 }
 
 // runBench handles `beevmd bench coldstart`.
@@ -132,6 +134,7 @@ func runBench(args []string) int {
 	fs.DurationVar(&s.Settle, "settle", 0, "build a throw-away snapshot with this settle time (default: use the normal snapshot)")
 	fs.BoolVar(&s.FCMetrics, "fc-metrics", false, "restore: also record Firecracker's own snapshot load time")
 	pin := fs.String("pin", "", "restore: comma-separated host CPUs for the firecracker process, e.g. 3")
+	isoFlags := addIsolationFlags(fs)
 	_ = fs.Parse(args[1:])
 	if _, err := os.Stat(s.CodeName); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err, "(run: make examples)")
@@ -160,6 +163,14 @@ func runBench(args []string) int {
 	cfg.BaseDir = filepath.Join(home, "run", "bench")
 	_ = os.RemoveAll(cfg.BaseDir)
 	defer os.RemoveAll(cfg.BaseDir)
+	iso, err := isoFlags.open(home, &cfg, nil, 2)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	defer closeIsolation(iso)
+	s.Isolation = *isoFlags.mode
+	s.Isolator = cfg.Isolator
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -269,9 +280,11 @@ func runBench(args []string) int {
 func benchManager(home, benchDir string, s benchSettings) (*snapshot.Manager, error) {
 	say := func(f string, a ...any) { fmt.Printf("== "+f+"\n", a...) }
 	if s.Settle <= 0 {
-		return snapshotManager(home, say)
+		return snapshotManager(home, s.Isolator, say)
 	}
-	m, err := snapshot.New(filepath.Join(benchDir, "snapshots"), vmConfig(home, snapshot.BootArgs, 1, 128), say)
+	base := vmConfig(home, snapshot.BootArgs, 1, 128)
+	base.Isolator = s.Isolator
+	m, err := snapshot.New(filepath.Join(benchDir, "snapshots"), base, say)
 	if err != nil {
 		return nil, err
 	}
@@ -600,6 +613,9 @@ func describeSettings(s benchSettings) string {
 	}
 	if len(s.Pin) > 0 {
 		parts = append(parts, fmt.Sprintf("firecracker pinned to CPUs %v (restore only)", s.Pin))
+	}
+	if s.Isolation != "" && s.Isolation != "none" {
+		parts = append(parts, "**isolation "+s.Isolation+"**")
 	}
 	return strings.Join(parts, "; ")
 }

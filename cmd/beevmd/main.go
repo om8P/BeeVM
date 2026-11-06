@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"sync"
 	"syscall"
@@ -83,14 +84,33 @@ func runtimeImages(home string) map[string]string {
 
 // beevmHome is where the binaries and images live (see scripts/common.sh).
 func beevmHome() string {
-	if h := os.Getenv("BEEVM_HOME"); h != "" {
+	return homeFrom(os.Getenv, os.Geteuid(), lookupHome, os.UserHomeDir)
+}
+
+// homeFrom is beevmHome with its inputs passed in (for tests). Under sudo HOME is /root, but
+// the images and the database are in the folder of the user who ran sudo (SUDO_USER).
+func homeFrom(getenv func(string) string, euid int, userHome func(name string) (string, error), ownHome func() (string, error)) string {
+	if h := getenv("BEEVM_HOME"); h != "" {
 		return h
 	}
-	h, err := os.UserHomeDir()
+	if su := getenv("SUDO_USER"); euid == 0 && su != "" && su != "root" {
+		if h, err := userHome(su); err == nil && h != "" {
+			return filepath.Join(h, ".beevm")
+		}
+	}
+	h, err := ownHome()
 	if err != nil {
 		return ".beevm"
 	}
 	return filepath.Join(h, ".beevm")
+}
+
+func lookupHome(name string) (string, error) {
+	u, err := user.Lookup(name)
+	if err != nil {
+		return "", err
+	}
+	return u.HomeDir, nil
 }
 
 func runBoot(args []string) int {

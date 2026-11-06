@@ -44,8 +44,10 @@ if ! grep -q '/usr/local/go/bin' "$HOME/.profile"; then
 fi
 
 # 4. Firecracker + jailer
-if [ -x "$BIN_DIR/firecracker" ] && "$BIN_DIR/firecracker" --version | head -1 | grep -q "v$FC_VERSION"; then
-  skip "Firecracker $FC_VERSION"
+# Both must match: the jailer (milestone 9 isolation) must be the same version as Firecracker.
+if [ -x "$BIN_DIR/firecracker" ] && "$BIN_DIR/firecracker" --version | head -1 | grep -q "v$FC_VERSION" \
+   && [ -x "$BIN_DIR/jailer" ] && "$BIN_DIR/jailer" --version | head -1 | grep -q "v$FC_VERSION"; then
+  skip "Firecracker + jailer $FC_VERSION"
 else
   TGZ="$CACHE_DIR/firecracker-v$FC_VERSION-x86_64.tgz"
   download "https://github.com/firecracker-microvm/firecracker/releases/download/v$FC_VERSION/firecracker-v$FC_VERSION-x86_64.tgz" "$TGZ" "$FC_SHA256"

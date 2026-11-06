@@ -60,7 +60,7 @@ type shim struct {
 	waitErr error         // valid after exited is closed
 }
 
-func startShim(runtime string, argv []string) (*shim, error) {
+func startShim(runtime string, argv []string, sb *sandbox) (*shim, error) {
 	reqR, reqW, err := os.Pipe()
 	if err != nil {
 		return nil, err
@@ -80,6 +80,7 @@ func startShim(runtime string, argv []string) (*shim, error) {
 	cmd.Stderr = tail
 	// Own process group, so stopping the shim also stops anything the function started.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	sb.apply(cmd) // the user's code runs inside the shim: not as root
 	cmd.WaitDelay = 2 * time.Second
 	if err := cmd.Start(); err != nil {
 		reqR.Close()
@@ -88,6 +89,7 @@ func startShim(runtime string, argv []string) (*shim, error) {
 		ansW.Close()
 		return nil, err
 	}
+	sb.started(cmd.Process.Pid)
 	// The child has its own copies; ours must be closed, or reads would never see EOF.
 	reqR.Close()
 	ansW.Close()
@@ -157,6 +159,19 @@ func readLine(r *bufio.Reader, max int) ([]byte, error) {
 		default:
 			return nil, err
 		}
+	}
+}
+
+// shimGroup is the running shim's process group (0 if none). The caller holds s.mu.
+func (s *Server) shimGroup() int {
+	if s.shim == nil || s.shim.cmd.Process == nil {
+		return 0
+	}
+	select {
+	case <-s.shim.exited:
+		return 0
+	default:
+		return s.shim.cmd.Process.Pid
 	}
 }
 
@@ -312,7 +327,7 @@ func (s *Server) handleLoad(w http.ResponseWriter, r *http.Request) {
 	}
 	start := time.Now()
 	if s.shim == nil {
-		sh, err := startShim(req.Runtime, argv)
+		sh, err := startShim(req.Runtime, argv, s.sb)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "cannot start the %s runtime: %v", req.Runtime, err)
 			return
@@ -350,6 +365,8 @@ func (s *Server) invokeShim(payload json.RawMessage, timeout time.Duration) agen
 	resp := agentproto.InvokeResponse{ExitCode: -1}
 	line, err := s.shim.roundTrip(shimInvoke{Op: "invoke", Payload: payload}, timeout)
 	resp.DurationMS = time.Since(start).Milliseconds()
+	// Processes the call started outside the shim's process group (setsid) do not survive it.
+	defer func() { s.sb.sweep(s.shimGroup()) }()
 	if errors.Is(err, errAnswerBig) {
 		resp.Error = s.shim.failure(err, timeout) // the shim is still fine: keep it
 		return resp
