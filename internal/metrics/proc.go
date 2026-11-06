@@ -7,25 +7,36 @@ import (
 	"strings"
 )
 
-// Memory of one process, from /proc/<pid>/smaps_rollup, in bytes.
+// ProcessMemory is the memory of one process, from /proc/<pid>/smaps_rollup, in bytes.
 //
 // RSS counts every page the process has in RAM, including pages it shares with others. PSS
 // (proportional set size) divides each shared page by the number of processes sharing it.
 // Restored VMs map the same snapshot memory file, so pages they only read are shared: PSS is
 // the honest "memory per VM" and adds up to the real total, RSS would count them N times.
-type procMemory struct {
+type ProcessMemory struct {
 	RSS uint64
 	PSS uint64
 }
 
+// ReadProcessMemory reads a process's memory from /proc/<pid>/smaps_rollup. The process must
+// belong to the caller (or the caller is root).
+func ReadProcessMemory(pid int) (ProcessMemory, error) {
+	return readSmapsRollup("/proc/" + strconv.Itoa(pid) + "/smaps_rollup")
+}
+
+// ReadNodeMemory returns the node's MemTotal and MemAvailable, in bytes.
+func ReadNodeMemory() (total, available uint64, err error) {
+	return readMeminfo("/proc/meminfo")
+}
+
 // readSmapsRollup reads the Rss and Pss lines of an smaps_rollup file.
-func readSmapsRollup(path string) (procMemory, error) {
+func readSmapsRollup(path string) (ProcessMemory, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return procMemory{}, err
+		return ProcessMemory{}, err
 	}
 	defer f.Close()
-	var m procMemory
+	var m ProcessMemory
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		name, kb, ok := kbLine(sc.Text())

@@ -28,7 +28,7 @@ Project lives in `C:\Users\ommga\Desktop\ACC\BeeVM\` (currently holds only the c
                         │ REST            │ REST + SSE          │ scrape /metrics
                         ▼                 ▼                     ▼
  ┌────────────────────────────── beevmd (Go daemon, one per bare-metal node) ──────────────────────────────┐
- │  API Gateway & HTTP Router  (/invoke/{fn}, /api/v1/*, /metrics, /events)  + tenant API-key auth          │
+ │  API Gateway & HTTP Router  (/invoke/{fn}, /api/v1/*, /metrics, /api/v1/events) + tenant API-key auth    │
  │        │                                                                                                 │
  │  Function Registry (SQLite)  ◀──▶  Artifact Store client (S3 API: MinIO local / AWS S3 cloud)            │
  │        │                                                                                                 │
@@ -54,7 +54,7 @@ Project lives in `C:\Users\ommga\Desktop\ACC\BeeVM\` (currently holds only the c
 
 | # | Component | What it does | Technology |
 |---|-----------|--------------|------------|
-| 1 | **API Gateway / Router** | `POST /invoke/{fn}`, admin REST (`/api/v1/functions`, `/vms`, `/tenants`), live events (SSE), `/metrics` | Go 1.23+, `net/http` + `go-chi/chi`, SSE |
+| 1 | **API Gateway / Router** | `POST /invoke/{fn}`, admin REST (`/api/v1/functions`, `/vms`, `/tenants`), live events (`GET /api/v1/events`, SSE; under `/api/v1/` so the key middleware covers it, built in M11), node density (`/api/v1/node`), `/metrics` | Go 1.23+, `net/http` + `go-chi/chi`, SSE (`internal/events` hub fed by a pool state-change hook) |
 | 2 | **Auth / tenancy** | Per-tenant API keys; every function and VM tagged with tenant | SHA-256 hashed keys in SQLite |
 | 3 | **Function Registry** | Name, tenant, runtime (`python`/`node`/`binary`), memory MB, vCPU, timeout, code hash, snapshot paths | SQLite via `modernc.org/sqlite` (pure Go, no CGO) |
 | 4 | **Artifact Store** | Stores uploaded function packages (zip/binary), snapshot backups | **MinIO** locally, **AWS S3** in cloud — same code via `aws-sdk-go-v2` S3 client |
@@ -68,7 +68,7 @@ Project lives in `C:\Users\ommga\Desktop\ACC\BeeVM\` (currently holds only the c
 | 12 | **Guest images** | Kernel + 3 rootfs images: `base` (agent only, for binaries), `python`, `node` | Firecracker CI `vmlinux-6.1`, rootfs built from the **Alpine** minirootfs, packages via `apk.static --root` under fakeroot → `mkfs.ext4 -d` (no Docker, no sudo) |
 | 13 | **Observability** | Metrics: cold/warm latency histograms, restore time, pool size, VMs per node, memory per VM. Structured logs. Built in M10: `GET /metrics` (`beevm_invocations_total`, `beevm_invoke_duration_seconds{start}`, `beevm_vm_ready_seconds{start,snapshot}`, `beevm_vms{state}`, `beevm_vm_memory_pss_bytes` from `/proc/<pid>/smaps_rollup`, ...), one JSON log line per request with a request id | `prometheus/client_golang`, Go `log/slog` (JSON) |
 | 14 | **CLI** `beevm` | `deploy`, `invoke`, `ls`, `rm`, `vms`, `logs`, `bench` | Go + `spf13/cobra` |
-| 15 | **Web Dashboard** *(optional module)* | Live VM grid (state colours), pool sizes, invoke button with timing, cold vs warm latency chart, density counter | **React + Vite + TypeScript**, **Recharts**, Tailwind; built to static files served by `beevmd` at `/ui` (or standalone) |
+| 15 | **Web Dashboard** *(optional module)* | Live VM grid (state colours), pool sizes, invoke button with timing, cold vs warm latency chart, density counter | **React + Vite + TypeScript**, **Recharts**, plain CSS (Tailwind dropped in M11); built to static files in `web/dist`, served by `beevmd --ui-dir` at `/ui/` (no embedding); Node 24 pinned in WSL for the build |
 | 16 | **Grafana stack** *(optional module)* | Pre-built dashboard JSON for latency/density/pool metrics | **Prometheus + Grafana**: pinned release tarballs via `make monitoring` (no Docker, the tested path) or Docker Compose (profile `monitoring`) |
 | 17 | **Benchmarks** | Cold boot vs snapshot restore vs warm hit; throughput; max VMs per node; isolation attack tests | Go bench tool (`cmd/beevm-bench`), **k6** for HTTP load, Python + **matplotlib** for charts |
 | 18 | **Infra (cloud run)** | Spin up benchmark node reproducibly | **Terraform** (GCP N2 with nested virt, or AWS `c5.metal`/`i3en.metal`) + cloud-init setup script |
@@ -86,7 +86,7 @@ Project lives in `C:\Users\ommga\Desktop\ACC\BeeVM\` (currently holds only the c
    - **First ever call / no snapshot**: restore **runtime snapshot**, push code over vsock, agent imports it, then take a **function snapshot** for next time.
 3. Router sends payload to agent over vsock → agent runs handler → returns JSON.
 4. `pool.Release(vm)`: back to idle pool with keep-alive TTL, or destroyed if pool is full / tenant limit hit.
-5. Metrics recorded (`beevm_invoke_seconds{path="warm|restore|boot"}`), event pushed to SSE.
+5. Metrics recorded (`beevm_invoke_duration_seconds{start="warm|restore|boot"}`), `invoke` event pushed to the SSE stream (every VM state change is a `vm` event).
 
 ---
 
@@ -125,7 +125,7 @@ Makefile
 
 ## Environment
 
-- **Dev:** Windows 11 → WSL2 **Ubuntu 24.04**, `nestedVirtualization=true` in `%UserProfile%\.wslconfig`, `/dev/kvm` accessible, Docker (for MinIO, Grafana, rootfs builds), Go 1.23+, Node 20 (dashboard build).
+- **Dev:** Windows 11 → WSL2 **Ubuntu 24.04**, `nestedVirtualization=true` in `%UserProfile%\.wslconfig`, `/dev/kvm` accessible, Docker (for MinIO, Grafana, rootfs builds), Go 1.23+, Node 24 (dashboard build only; pinned tarball via `make ui`).
 - **Benchmark:** Terraform-created Linux node (GCP N2 nested-virt for cheap runs; optional short `i3en.metal` run to match the table), AWS S3 bucket instead of MinIO.
 
 ---

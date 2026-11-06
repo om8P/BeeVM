@@ -18,6 +18,7 @@ import (
 	"github.com/om8P/BeeVM/internal/agentproto"
 	"github.com/om8P/BeeVM/internal/api"
 	"github.com/om8P/BeeVM/internal/codestore"
+	"github.com/om8P/BeeVM/internal/events"
 	"github.com/om8P/BeeVM/internal/metrics"
 	"github.com/om8P/BeeVM/internal/pool"
 	"github.com/om8P/BeeVM/internal/registry"
@@ -75,6 +76,7 @@ func runServe(args []string) int {
 	withMetrics := fs.Bool("metrics", true, "serve Prometheus metrics at GET /metrics on --addr (no API key: keep --addr on localhost or firewalled)")
 	logLevel := fs.String("log-level", "info", "debug, info, warn or error")
 	logFormat := fs.String("log-format", "json", "json (one JSON object per line) or text")
+	uiDir := fs.String("ui-dir", "web/dist", "serve the web dashboard from this folder at /ui/ if it was built (make ui); empty = off")
 	_ = fs.Parse(args)
 
 	logger, err := newLogger(*logLevel, *logFormat)
@@ -87,6 +89,7 @@ func runServe(args []string) int {
 		mets = metrics.New()
 	}
 	home := beevmHome()
+	hub := events.New(0) // live changes for GET /api/v1/events
 
 	reg, err := openRegistry(home)
 	if err != nil {
@@ -225,6 +228,7 @@ func runServe(args []string) int {
 			if mets != nil {
 				pcfg.OnRecycle = mets.ObserveRecycle
 			}
+			pcfg.OnStateChange = api.VMEvents(hub)
 			w := runner.NewWarmRunner(base, snaps, pcfg, logger)
 			for rt, path := range images {
 				w.SetRootfs(rt, path)
@@ -249,16 +253,22 @@ func runServe(args []string) int {
 	}
 
 	handler := api.New(api.Deps{
-		Registry: reg, Code: code, Logger: logger, Runner: run, Metrics: mets,
+		Registry: reg, Code: code, Logger: logger, Runner: run, Metrics: mets, Events: hub,
 	}).Handler()
+	handler, withDashboard := withUI(handler, *uiDir)
+	if !withDashboard && *uiDir != "" {
+		logger.Info("web dashboard not built, serving the API only (make ui)", "ui_dir", *uiDir)
+	}
 	srv := &http.Server{Addr: *addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	// Open event streams never end by themselves; Shutdown would wait for them forever.
+	srv.RegisterOnShutdown(hub.Close)
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
-	logger.Info("listening", "addr", *addr, "metrics", *withMetrics, "max_vms", *maxVMs, "runner", *runnerKind, "keep_alive", keepAlive.String(), "runtimes", append([]string{agentproto.RuntimeBinary}, available...), "home", home, "isolation", *isoFlags.mode)
+	logger.Info("listening", "addr", *addr, "metrics", *withMetrics, "ui", withDashboard, "max_vms", *maxVMs, "runner", *runnerKind, "keep_alive", keepAlive.String(), "runtimes", append([]string{agentproto.RuntimeBinary}, available...), "home", home, "isolation", *isoFlags.mode)
 
 	select {
 	case err := <-errCh:

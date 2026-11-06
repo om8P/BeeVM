@@ -92,7 +92,7 @@ Good reasons to refine: a test is flaky, code is hard to read, you don't underst
 ## M11: Web dashboard
 - **Goal:** a live demo screen.
 - **Do:** `web/` (React, Vite, TypeScript, Recharts): VM grid with state colours, pool sizes, an invoke button with timing, cold vs warm chart, density counter. Served from `beevmd` at `/ui` using the public REST/SSE API only.
-- **Done when:** the dashboard updates live while you run a k6 load test.
+- **Done when:** the dashboard updates live while you run a load test (`beevmd bench load`; k6 comes in M12).
 - **Optional module:** can be deleted without touching core code. Skip if time is short.
 
 ## M12: Benchmarks and density
