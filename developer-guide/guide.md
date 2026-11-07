@@ -20,6 +20,9 @@ It grows with the project: each finished milestone adds a section. The reasons b
 | Part 10: Milestone 8, Python and Node.js runtimes, function snapshots | Done |
 | Part 11: the repository, GitHub and renames | Done |
 | Part 12: Milestone 9, isolation and networking | Done |
+| Part 13: Milestone 10, observability | Done |
+| Part 14: Milestone 11, the web dashboard | Done |
+| Part 12: Milestone 9, isolation and networking | Done |
 | Part 13: Milestone 10, observability (optional module) | Done |
 | Part 14: Milestone 11, the web dashboard (optional module) | Done |
 | Appendices: cheat sheet, versions, numbers, troubleshooting, regenerating these documents | — |
@@ -1697,6 +1700,12 @@ To find every old reference before a rename: `grep -rIl "old-name" --exclude-dir
 | `e5d30d2` | Milestone 6 refine: faster, steadier snapshot restore (with the userfaultfd spike) |
 | `8c3618d` | document the milestone 6 refines in full detail |
 | `b5029e4` | Milestone 7 |
+| `8afce37` | update build guide for milestone 7 |
+| `b871ff2` | update learning notes for milestone 7 |
+| `c42eac0` | Milestone 8 |
+| `c4b6a7b` | Milestone 9 |
+| `83a9aa1` | Milestone 10 |
+| `6b4c3c3` | Milestone 11 |
 
 ---
 
