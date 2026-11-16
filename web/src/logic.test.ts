@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { errorText, parseTiming, type InvokeEvent, type VM } from './api'
-import { callsPerSecond, initialState, MAX_CALLS, pools, prunePulse, reduce } from './state'
+import type { Fn } from './api'
+import { applyFunctionEvent, callsPerSecond, initialState, MAX_CALLS, pools, prunePulse, reduce } from './state'
 import { fmtBytes, fmtMs, percentile, summarize } from './stats'
 
 const vm = (id: string, state: VM['state'], fn = 'hello', extra: Partial<VM> = {}): VM => ({
@@ -63,6 +64,23 @@ describe('reduce', () => {
     expect(s.calls).toHaveLength(MAX_CALLS)
     expect(s.calls[0].duration_ms).toBe(5)
     expect(s.calls[MAX_CALLS - 1].seq).toBe(MAX_CALLS + 5)
+  })
+})
+
+describe('applyFunctionEvent', () => {
+  const fn = (name: string, sha = 'a'): Fn => ({
+    name, runtime: 'binary', code_sha256: sha, code_size: 1, memory_mib: 128, vcpus: 1, timeout_ms: 10000,
+    created_at: '', updated_at: '',
+  })
+  it('adds in name order, replaces on redeploy, removes on delete', () => {
+    let list = applyFunctionEvent([fn('b')], { action: 'deployed', function: fn('a') })
+    expect(list.map((f) => f.name)).toEqual(['a', 'b'])
+    list = applyFunctionEvent(list, { action: 'deployed', function: fn('a', 'new') })
+    expect(list).toHaveLength(2)
+    expect(list[0].code_sha256).toBe('new')
+    list = applyFunctionEvent(list, { action: 'deleted', function: { ...fn('b'), runtime: '' } })
+    expect(list.map((f) => f.name)).toEqual(['a'])
+    expect(applyFunctionEvent(list, { action: 'deleted', function: fn('zzz') })).toEqual(list)
   })
 })
 

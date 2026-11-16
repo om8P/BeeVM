@@ -83,6 +83,7 @@ func (s *Server) Handler() http.Handler {
 		})
 		r.Get("/api/v1/vms", s.listVMs)
 		r.Get("/api/v1/node", s.nodeInfo)
+		r.Get("/api/v1/me", s.me)
 		if s.Events != nil {
 			r.Get("/api/v1/events", s.streamEvents)
 		}

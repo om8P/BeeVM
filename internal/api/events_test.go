@@ -171,12 +171,59 @@ func TestEventsFunctionDeployedAfterHello(t *testing.T) {
 	s := e.openEvents(alice)
 	sseData[apitypes.Hello](t, s.next(t), apitypes.EventHello)
 	status(t, e.deploy(alice, "late", elf("v1"), ""), 201)
+	sseData[apitypes.FunctionEvent](t, s.next(t), apitypes.EventFunction) // the deploy itself
 	ta, _ := e.reg.GetTenant("alice")
 	f, _ := e.reg.GetFunction(ta.ID, "late")
 	VMEvents(hub)(pool.StateChange{VM: pool.VMInfo{ID: "vm-1", TenantID: ta.ID, FunctionID: f.ID, State: pool.Restoring}})
 	if vm := sseData[apitypes.VM](t, s.next(t), apitypes.EventVM); vm.Function != "late" {
 		t.Errorf("name of a new function = %q", vm.Function)
 	}
+}
+
+func TestEventsFunctionDeployAndDelete(t *testing.T) {
+	e, _, _ := newEventsEnv(t)
+	alice, bob := e.tenant("alice"), e.tenant("bob")
+	as, bs := e.openEvents(alice), e.openEvents(bob)
+	sseData[apitypes.Hello](t, as.next(t), apitypes.EventHello)
+	sseData[apitypes.Hello](t, bs.next(t), apitypes.EventHello)
+
+	status(t, e.deploy(alice, "hello", elf("v1"), `{"memory_mib":256}`), 201)
+	ev := sseData[apitypes.FunctionEvent](t, as.next(t), apitypes.EventFunction)
+	if ev.Action != apitypes.FunctionDeployed || ev.Function.Name != "hello" || ev.Function.MemoryMiB != 256 ||
+		ev.Function.Runtime != "binary" || ev.Function.CodeSHA256 == "" {
+		t.Errorf("deploy event = %+v", ev)
+	}
+	status(t, e.deploy(alice, "hello", elf("v2"), ""), 200) // a redeploy is "deployed" too
+	if ev2 := sseData[apitypes.FunctionEvent](t, as.next(t), apitypes.EventFunction); ev2.Action != apitypes.FunctionDeployed ||
+		ev2.Function.CodeSHA256 == ev.Function.CodeSHA256 {
+		t.Errorf("redeploy event = %+v", ev2)
+	}
+	status(t, e.deploy(alice, "bad", []byte("not an ELF"), ""), 400) // a failed deploy is no event
+	status(t, e.do("DELETE", "/api/v1/functions/hello", alice, nil, ""), 204)
+	if del := sseData[apitypes.FunctionEvent](t, as.next(t), apitypes.EventFunction); del.Action != apitypes.FunctionDeleted ||
+		del.Function.Name != "hello" {
+		t.Errorf("delete event = %+v", del)
+	}
+	status(t, e.do("DELETE", "/api/v1/functions/hello", alice, nil, ""), 404) // nothing deleted: no event
+
+	// Bob saw none of alice's functions: his first message after hello is his own deploy.
+	status(t, e.deploy(bob, "mine", elf("b"), ""), 201)
+	if b := sseData[apitypes.FunctionEvent](t, bs.next(t), apitypes.EventFunction); b.Function.Name != "mine" {
+		t.Errorf("bob got %+v", b)
+	}
+	select {
+	case m := <-as.msgs:
+		t.Errorf("alice got an extra message %+v", m)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestMe(t *testing.T) {
+	e := newEnv(t) // works without a hub or a pool
+	if me := decode[apitypes.Me](t, e.do("GET", "/api/v1/me", e.tenant("alice"), nil, "")); me.Tenant != "alice" {
+		t.Errorf("me = %+v", me)
+	}
+	status(t, e.do("GET", "/api/v1/me", "", nil, ""), 401)
 }
 
 func TestEventsEndWhenTheHubCloses(t *testing.T) {

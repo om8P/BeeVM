@@ -10,6 +10,7 @@ import {
   YAxis,
   ZAxis,
 } from 'recharts'
+import type { Fn } from '../api'
 import type { Call } from '../state'
 import { fmtMs, summarize } from '../stats'
 
@@ -29,9 +30,18 @@ interface Point {
 
 // LatencyChart: every call of the last minutes as a dot, by how its VM started. The y axis is
 // logarithmic so a 1 ms warm call and a 1 s boot both stay readable.
-export function LatencyChart({ calls, now }: { calls: Call[]; now: number }) {
+export function LatencyChart({ calls, functions, now }: { calls: Call[]; functions: Fn[]; now: number }) {
   const [win, setWin] = useState(120)
-  const recent = useMemo(() => calls.filter((c) => c.t >= now - win * 1000 && c.start), [calls, now, win])
+  const [fn, setFn] = useState('') // '' = all functions
+  // Deployed functions, plus any that only appear in recent calls (deleted since).
+  const names = useMemo(
+    () => [...new Set([...functions.map((f) => f.name), ...calls.map((c) => c.function)])].sort(),
+    [functions, calls],
+  )
+  const recent = useMemo(
+    () => calls.filter((c) => c.t >= now - win * 1000 && c.start && (!fn || c.function === fn)),
+    [calls, now, win, fn],
+  )
   const series = useMemo(
     () =>
       KINDS.map((k) => ({
@@ -52,6 +62,14 @@ export function LatencyChart({ calls, now }: { calls: Call[]; now: number }) {
     <section className="card panel chart" aria-label="Latency, cold vs warm">
       <div className="panel-head">
         <h2>Latency: cold vs warm</h2>
+        <select className="fn-filter" aria-label="Function" value={fn} onChange={(e) => setFn(e.target.value)}>
+          <option value="">All functions</option>
+          {names.map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+        </select>
         <div className="seg" role="group" aria-label="Time window">
           {WINDOWS.map((w) => (
             <button key={w} className={w === win ? 'on' : ''} onClick={() => setWin(w)}>
@@ -76,7 +94,9 @@ export function LatencyChart({ calls, now }: { calls: Call[]; now: number }) {
       <div className="chart-box">
         <div className="axis-title muted">server time per call, ms (log scale)</div>
         {recent.length === 0 ? (
-          <p className="muted empty">No calls in the last {win} s. Invoke a function or run a load test.</p>
+          <p className="muted empty">
+            No calls{fn ? ` of ${fn}` : ''} in the last {win} s. Invoke a function or run a load test.
+          </p>
         ) : (
           <ResponsiveContainer width="100%" height={260}>
             <ScatterChart margin={{ top: 8, right: 16, bottom: 4, left: 4 }}>

@@ -2052,6 +2052,19 @@ make test-kvm   # 316 passing, new TestE2EEvents: real warm pool, the stream sho
 
 Not checked: the stream with `--isolation jailer` (the hook does not depend on the isolation mode, and memory reading needs root as in 13.8), a browser other than the Claude desktop app's (Chromium), and very long sessions (the page keeps the last 600 calls).
 
+### 14.9 Refine (2026-11-16): filter, live function list, tenant name, smaller bundle
+
+| Change | How |
+|---|---|
+| Filter the latency chart by function | a dropdown next to the time window ("All functions" or one name); it filters the dots and the p50 / p99 table |
+| No more polling the function list | new stream event `function` (`{"action":"deployed"\|"deleted","function":{...}}`), sent after a successful deploy (new or replaced) or delete, to that tenant only. The page applies it to its list (`applyFunctionEvent`); a deploy from the CLI shows up in the Invoke list, the filter and the pools table at once |
+| Show the tenant's name | new `GET /api/v1/me` → `{"tenant":"demo"}`; the header shows "tenant demo" |
+| Smaller JavaScript | the chart component is loaded with `React.lazy`: Vite puts it and Recharts in a separate file the browser fetches after the rest of the page works ("Loading the chart…" meanwhile). Main file **613 → 241 kB** (gzip 183 → 76 kB); chart file 374 kB (gzip 108 kB) |
+
+**Code splitting in one sentence:** a static `import` puts code into the same file as the importer; a dynamic `import('./x')` tells the bundler "this can come later", so it becomes its own file that is only downloaded when that code is first needed.
+
+All four are additive: older clients that ignore unknown events keep working (`beevm` never reads the stream). Tests: `TestEventsFunctionDeployAndDelete` (deploy, redeploy, failed deploy = no event, delete, missing delete = no event, other tenant sees nothing), `TestMe`, Vitest `applyFunctionEvent` (16 dashboard tests).
+
 ---
 
 ## Appendix A: command cheat sheet

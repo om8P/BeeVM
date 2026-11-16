@@ -1,14 +1,26 @@
-import { useCallback, useEffect, useMemo, useReducer, useState } from 'react'
-import { ApiError, Client, type Fn, type Hello, type InvokeEvent, type NodeInfo, type VM } from './api'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useState } from 'react'
+import {
+  ApiError,
+  Client,
+  type Fn,
+  type FunctionEvent,
+  type Hello,
+  type InvokeEvent,
+  type NodeInfo,
+  type VM,
+} from './api'
 import { connectEvents, type StreamStatus } from './sse'
-import { callsPerSecond, initialState, prunePulse, reduce } from './state'
+import { applyFunctionEvent, callsPerSecond, initialState, prunePulse, reduce } from './state'
 import { forgetKey, loadKey, saveKey } from './storage'
 import { KeyForm } from './components/KeyForm'
 import { Density } from './components/Density'
 import { VmGrid } from './components/VmGrid'
 import { InvokePanel } from './components/InvokePanel'
-import { LatencyChart } from './components/LatencyChart'
 import { PoolTable } from './components/PoolTable'
+
+// The chart library (Recharts) is most of the JavaScript. Loading the chart lazily puts it in a
+// separate file that the browser fetches after the rest of the page is already working.
+const LatencyChart = lazy(() => import('./components/LatencyChart').then((m) => ({ default: m.LatencyChart })))
 
 export function App() {
   const [key, setKey] = useState(loadKey)
@@ -41,6 +53,7 @@ function Dashboard({ apiKey, onSignOut }: { apiKey: string; onSignOut: (reason?:
   const [status, setStatus] = useState<StreamStatus>('connecting')
   const [functions, setFunctions] = useState<Fn[]>([])
   const [node, setNode] = useState<NodeInfo | null>(null)
+  const [tenant, setTenant] = useState('')
   const [now, setNow] = useState(Date.now())
 
   // Any 401 means the key is wrong or was revoked: back to the key form.
@@ -73,7 +86,9 @@ function Dashboard({ apiKey, onSignOut }: { apiKey: string; onSignOut: (reason?:
             loadFunctions() // a reconnect may follow deploys we did not see
           } else if (m.event === 'vm') {
             dispatch({ type: 'vm', vm: data as VM, now: t })
-            if (!(data as VM).function) loadFunctions()
+          } else if (m.event === 'function') {
+            // A deploy or delete (also from the CLI): no need to poll the function list.
+            setFunctions((list) => applyFunctionEvent(list, data as FunctionEvent))
           } else if (m.event === 'invoke') {
             dispatch({ type: 'invoke', call: data as InvokeEvent, now: t })
           }
@@ -84,18 +99,15 @@ function Dashboard({ apiKey, onSignOut }: { apiKey: string; onSignOut: (reason?:
     })
   }, [client, onSignOut, loadFunctions])
 
-  // Deploys are not events, and node memory is read on request: poll those.
+  // Who we are (once), and node memory, which is read on request: poll that one. The function
+  // list comes with the stream's hello and is then kept up to date by "function" events.
   useEffect(() => {
-    loadFunctions()
-    const f = setInterval(loadFunctions, 10_000)
+    client.me().then((m) => setTenant(m.tenant), onError)
     const loadNode = () => client.node().then(setNode, onError)
     loadNode()
     const n = setInterval(loadNode, 2_000)
-    return () => {
-      clearInterval(f)
-      clearInterval(n)
-    }
-  }, [client, loadFunctions, onError])
+    return () => clearInterval(n)
+  }, [client, onError])
 
   // A clock for ages and tile flashes.
   useEffect(() => {
@@ -116,6 +128,11 @@ function Dashboard({ apiKey, onSignOut }: { apiKey: string; onSignOut: (reason?:
           </svg>
           <span>BeeVM</span>
           <span className="muted">live dashboard</span>
+          {tenant && (
+            <span className="tenant" title="The tenant this API key belongs to">
+              tenant <strong>{tenant}</strong>
+            </span>
+          )}
         </div>
         <div className="top-right">
           <span className={`pill pill-${status}`} title="Event stream (GET /api/v1/events)">
@@ -137,7 +154,16 @@ function Dashboard({ apiKey, onSignOut }: { apiKey: string; onSignOut: (reason?:
       </div>
 
       <div className="row row-main row-bottom">
-        <LatencyChart calls={live.calls} now={now} />
+        <Suspense
+          fallback={
+            <section className="card panel chart">
+              <h2>Latency: cold vs warm</h2>
+              <p className="muted empty">Loading the chart…</p>
+            </section>
+          }
+        >
+          <LatencyChart calls={live.calls} functions={functions} now={now} />
+        </Suspense>
         <PoolTable vms={vms} functions={functions} calls={live.calls} client={client} onError={onError} />
       </div>
 

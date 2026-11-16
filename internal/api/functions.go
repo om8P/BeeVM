@@ -206,6 +206,7 @@ func (s *Server) putFunction(w http.ResponseWriter, r *http.Request) {
 	if created {
 		status = http.StatusCreated
 	}
+	s.publishFunction(tenant.ID, apitypes.FunctionEvent{Action: apitypes.FunctionDeployed, Function: toAPIFunction(f)})
 	writeJSON(w, status, toAPIFunction(f))
 }
 
@@ -267,5 +268,6 @@ func (s *Server) deleteFunction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.releaseCode(sha)
+	s.publishFunction(tenantID, apitypes.FunctionEvent{Action: apitypes.FunctionDeleted, Function: apitypes.Function{Name: name}})
 	w.WriteHeader(http.StatusNoContent)
 }

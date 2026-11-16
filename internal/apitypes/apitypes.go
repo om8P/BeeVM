@@ -81,7 +81,27 @@ const (
 	EventHello  = "hello"  // Hello: the full picture; sent first, and again if the stream fell behind
 	EventVM     = "vm"     // VM: one VM changed state (State "destroyed" = remove it)
 	EventInvoke = "invoke" // InvokeEvent: a call finished
+	// EventFunction carries a FunctionEvent: a function was deployed (created or replaced) or
+	// deleted. Added in the M11 refine, so clients need not poll the function list.
+	EventFunction = "function"
 )
+
+// FunctionEvent is the "function" event.
+type FunctionEvent struct {
+	Action   string   `json:"action"`   // FunctionDeployed or FunctionDeleted
+	Function Function `json:"function"` // for "deleted" only Name is set
+}
+
+// FunctionEvent actions.
+const (
+	FunctionDeployed = "deployed"
+	FunctionDeleted  = "deleted"
+)
+
+// Me is the answer to GET /api/v1/me: who the API key belongs to.
+type Me struct {
+	Tenant string `json:"tenant"`
+}
 
 // Hello is the "hello" event: the caller's VMs right now.
 type Hello struct {

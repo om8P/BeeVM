@@ -11,8 +11,9 @@ import "sync"
 
 // Event types.
 const (
-	TypeVM     = "vm"     // Data: a VM's new state
-	TypeInvoke = "invoke" // Data: a finished call
+	TypeVM       = "vm"       // Data: a VM's new state
+	TypeInvoke   = "invoke"   // Data: a finished call
+	TypeFunction = "function" // Data: a function was deployed or deleted
 )
 
 // Event is one thing that happened, for one tenant.

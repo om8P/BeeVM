@@ -1,7 +1,15 @@
 // The dashboard's live state, changed only by events from the server (a reducer: a pure
 // function from (old state, event) to new state, which makes it easy to test).
 
-import type { Hello, InvokeEvent, VM } from './api'
+import type { Fn, FunctionEvent, Hello, InvokeEvent, VM } from './api'
+
+// applyFunctionEvent updates the function list for a deploy or delete, sorted by name like
+// GET /api/v1/functions.
+export function applyFunctionEvent(list: Fn[], ev: FunctionEvent): Fn[] {
+  const rest = list.filter((f) => f.name !== ev.function.name)
+  if (ev.action === 'deleted') return rest
+  return [...rest, ev.function].sort((a, b) => a.name.localeCompare(b.name))
+}
 
 export const MAX_CALLS = 600 // how many recent calls the chart keeps
 

@@ -205,6 +205,21 @@ label.check input {
   font-weight: 400;
   font-size: 14px;
 }
+.tenant {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-2);
+  margin-left: 4px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+.fn-filter {
+  width: auto;
+  max-width: 180px;
+  margin-left: auto;
+  padding: 2px 6px;
+  font-size: 12px;
+}
 .top-right {
   display: flex;
   align-items: center;

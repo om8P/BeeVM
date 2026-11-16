@@ -44,6 +44,21 @@ func (s *Server) publishInvoke(info *reqInfo, status int, d time.Duration) {
 	s.Events.Publish(events.Event{Type: events.TypeInvoke, TenantID: info.tenantID, Data: ev})
 }
 
+// publishFunction sends a deploy or delete to the event stream (if there is one).
+func (s *Server) publishFunction(tenantID int64, ev apitypes.FunctionEvent) {
+	if s.Events == nil {
+		return
+	}
+	s.Events.Publish(events.Event{Type: events.TypeFunction, TenantID: tenantID, Data: ev})
+}
+
+// me tells a client which tenant its API key belongs to.
+//
+//	GET /api/v1/me   200 {"tenant":"alice"}
+func (s *Server) me(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, apitypes.Me{Tenant: tenantFrom(r.Context()).Name})
+}
+
 // streamEvents is a Server-Sent Events stream of the caller's live changes.
 //
 //	GET /api/v1/events    (Accept: text/event-stream)
@@ -134,6 +149,8 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 				okSend = send(apitypes.EventVM, vm)
 			case apitypes.InvokeEvent:
 				okSend = send(apitypes.EventInvoke, d)
+			case apitypes.FunctionEvent:
+				okSend = send(apitypes.EventFunction, d)
 			}
 			// Fell behind and events were dropped: send the full picture again.
 			if okSend && s.Events.Lagged(sub) {

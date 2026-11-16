@@ -47,6 +47,16 @@ export interface InvokeEvent {
   at: string
 }
 
+// The "function" event: a function was deployed (created or replaced) or deleted.
+export interface FunctionEvent {
+  action: 'deployed' | 'deleted'
+  function: Fn // for "deleted" only the name is set
+}
+
+export interface Me {
+  tenant: string
+}
+
 export interface NodeInfo {
   max_vms: number
   vms: number
@@ -144,6 +154,9 @@ export class Client {
   }
   async vms(signal?: AbortSignal): Promise<VM[]> {
     return (await this.json<{ vms: VM[] }>('GET', '/api/v1/vms', signal)).vms
+  }
+  me(signal?: AbortSignal): Promise<Me> {
+    return this.json<Me>('GET', '/api/v1/me', signal)
   }
   node(signal?: AbortSignal): Promise<NodeInfo> {
     return this.json<NodeInfo>('GET', '/api/v1/node', signal)
