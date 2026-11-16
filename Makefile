@@ -49,7 +49,7 @@ build:
 # Functions run inside an Alpine guest (musl), so they must be static: CGO_ENABLED=0.
 examples:
 	@mkdir -p bin/functions
-	@for f in hello-go-binary testfn forkbomb memhog cpuhog netprobe hostread; do \
+	@for f in hello-go-binary testfn forkbomb memhog cpuhog netprobe hostread matrix; do \
 	  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -ldflags="-s -w" -o bin/functions/$$f ./examples/functions/$$f || exit 1; \
 	  echo "built bin/functions/$$f"; \
 	done
