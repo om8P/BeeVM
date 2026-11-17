@@ -1680,32 +1680,32 @@ To find every old reference before a rename: `grep -rIl "old-name" --exclude-dir
 
 | Commit | What |
 |---|---|
-| `918d884` | planning docs and project setup |
-| `e6fdccb` | 13-milestone session guide |
-| `e6dad4a` | Milestone 1 |
-| `bd71997` | Milestone 2 |
-| `717a840` | stop tracking the course document |
-| `6364ecd` | rename Go module to match the repository name |
-| `c70ccc2` | add this build guide |
-| `6a31586` | move the guide and learning notes to `developer-guide/` |
-| `7464297` | Milestone 3 |
-| `aded71e` | rename Go module to `github.com/om8P/BeeVM` |
-| `88fd5c5` | update guide and learning notes through milestone 3 |
-| `9d92a7f` | Milestone 4 |
-| `d91588c` | Milestone 5 |
-| `afd078b` | update guide and learning notes through milestone 5 |
-| `1488561` | demonstration script for milestones 1 to 5 |
-| `56d718e` | Milestone 6 |
-| `6c763bd` | update guide and learning notes for milestone 6 |
-| `e5d30d2` | Milestone 6 refine: faster, steadier snapshot restore (with the userfaultfd spike) |
-| `8c3618d` | document the milestone 6 refines in full detail |
-| `b5029e4` | Milestone 7 |
-| `8afce37` | update build guide for milestone 7 |
-| `b871ff2` | update learning notes for milestone 7 |
-| `c42eac0` | Milestone 8 |
-| `c4b6a7b` | Milestone 9 |
-| `83a9aa1` | Milestone 10 |
-| `6b4c3c3` | Milestone 11 |
+| `2a0cd3d` | planning docs and project setup |
+| `40c3900` | 13-milestone session guide |
+| `77d22dd` | Milestone 1 |
+| `8c5b82b` | Milestone 2 |
+| `676f514` | stop tracking the course document |
+| `cc94e06` | rename Go module to match the repository name |
+| `0337349` | add this build guide |
+| `cc2abee` | move the guide and learning notes to `developer-guide/` |
+| `7d9796c` | Milestone 3 |
+| `18d004a` | rename Go module to `github.com/om8P/BeeVM` |
+| `5dbcc40` | update guide and learning notes through milestone 3 |
+| `840f19c` | Milestone 4 |
+| `92e55be` | Milestone 5 |
+| `128e86b` | update guide and learning notes through milestone 5 |
+| `d3d5406` | demonstration script for milestones 1 to 5 |
+| `c2571a4` | Milestone 6 |
+| `826a83f` | update guide and learning notes for milestone 6 |
+| `c60df43` | Milestone 6 refine: faster, steadier snapshot restore (with the userfaultfd spike) |
+| `a99367a` | document the milestone 6 refines in full detail |
+| `64cb026` | Milestone 7 |
+| `b1acdbb` | update build guide for milestone 7 |
+| `565d2c0` | update learning notes for milestone 7 |
+| `fdb7fc3` | Milestone 8 |
+| `d65f375` | Milestone 9 |
+| `7d11342` | Milestone 10 |
+| `1037e5c` | Milestone 11 |
 
 ---
 

@@ -141,7 +141,7 @@ Status values: Not started · In progress · Done · Done, needs refinement (say
   - Identical runs can differ by 15 ms at p99; compare within one session and repeat key runs.
   - Tooling: the first `go vet` over `/mnt/c` took ~5 min and a 400 s tool timeout killed `go test` (exit 15, no output): run long jobs in the background with a log. `python3` in Git Bash is Windows Python (a heredoc trick opened its prompt). `gofmt -w` fixed a struct alignment.
 - Cleaned up: duplicated M5 entry here, duplicated artifact-store line in CLAUDE.md. Two stale snapshots stay until `serve` or `snapshot rm --stale` removes them.
-- Committed as `e5d30d2` together with refine 2.
+- Committed as `c60df43` together with refine 2.
 
 ### 2026-11-02: Milestone 6 refine 2 (userfaultfd prefetch): spike only, deferred
 - **Idea** (REAP paper, Ustiugov et al., ASPLOS 2021): a restored function touches nearly the same ~2,000 pages every time; record them once and copy them into the VM in one go at restore, instead of ~27-37 µs per fault. Tool: userfaultfd, through Firecracker's `mem_backend` type `Uffd`.
