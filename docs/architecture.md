@@ -15,7 +15,7 @@ Decisions made with the user:
 - User functions: **Python, Node.js, and static Linux binaries**
 - Both a **web dashboard** and **CLI + Prometheus/Grafana**, built so either one can be deleted without touching the core
 
-Project lives in `C:\Users\ommga\Desktop\ACC\BeeVM\` (currently holds only the case-study .docx). Code runs inside WSL2 Ubuntu.
+Project lives in `C:\Users\ommga\Desktop\ACC\BeeVM\` ; code runs inside WSL2 Ubuntu. This file is the design; what was actually built, with measurements, is in `docs/progress.md`, and the quick start is in `README.md`. (Brought up to date with the code on 2026-11-16, after milestone 11.)
 
 ---
 
@@ -54,7 +54,7 @@ Project lives in `C:\Users\ommga\Desktop\ACC\BeeVM\` (currently holds only the c
 
 | # | Component | What it does | Technology |
 |---|-----------|--------------|------------|
-| 1 | **API Gateway / Router** | `POST /invoke/{fn}`, admin REST (`/api/v1/functions`, `/vms`, `/tenants`), live events (`GET /api/v1/events`, SSE; under `/api/v1/` so the key middleware covers it, built in M11), node density (`/api/v1/node`), `/metrics` | Go 1.23+, `net/http` + `go-chi/chi`, SSE (`internal/events` hub fed by a pool state-change hook) |
+| 1 | **API Gateway / Router** | `POST /invoke/{fn}`, admin REST (`/api/v1/functions`, `/vms`, `/tenants`), live events (`GET /api/v1/events`, SSE; under `/api/v1/` so the key middleware covers it, built in M11), node density (`/api/v1/node`), `/metrics` | Go 1.24+ (1.27.3 installed), `net/http` + `go-chi/chi`, SSE (`internal/events` hub fed by a pool state-change hook) |
 | 2 | **Auth / tenancy** | Per-tenant API keys; every function and VM tagged with tenant | SHA-256 hashed keys in SQLite |
 | 3 | **Function Registry** | Name, tenant, runtime (`python`/`node`/`binary`), memory MB, vCPU, timeout, code hash, snapshot paths | SQLite via `modernc.org/sqlite` (pure Go, no CGO) |
 | 4 | **Artifact Store** | Stores uploaded function packages (zip/binary), snapshot backups | **MinIO** locally, **AWS S3** in cloud — same code via `aws-sdk-go-v2` S3 client |
@@ -67,10 +67,10 @@ Project lives in `C:\Users\ommga\Desktop\ACC\BeeVM\` (currently holds only the c
 | 11 | **Runtime shims** | Python: persistent process importing `handler.py` → `handler(event)`. Node: same with `index.js`. Binary: exec with JSON on stdin, JSON on stdout | Python 3.14, Node.js 24 (Alpine 3.24 packages; changed from 3.12/20 on 2026-11-05), small shim scripts talking JSON lines on fd 3/4 |
 | 12 | **Guest images** | Kernel + 3 rootfs images: `base` (agent only, for binaries), `python`, `node` | Firecracker CI `vmlinux-6.1`, rootfs built from the **Alpine** minirootfs, packages via `apk.static --root` under fakeroot → `mkfs.ext4 -d` (no Docker, no sudo) |
 | 13 | **Observability** | Metrics: cold/warm latency histograms, restore time, pool size, VMs per node, memory per VM. Structured logs. Built in M10: `GET /metrics` (`beevm_invocations_total`, `beevm_invoke_duration_seconds{start}`, `beevm_vm_ready_seconds{start,snapshot}`, `beevm_vms{state}`, `beevm_vm_memory_pss_bytes` from `/proc/<pid>/smaps_rollup`, ...), one JSON log line per request with a request id | `prometheus/client_golang`, Go `log/slog` (JSON) |
-| 14 | **CLI** `beevm` | `deploy`, `invoke`, `ls`, `rm`, `vms`, `logs`, `bench` | Go + `spf13/cobra` |
+| 14 | **CLI** `beevm` | `deploy`, `invoke` (`-l` shows the function's log), `get`, `ls`, `rm`, `prewarm`, `vms`, `login`/`logout`/`whoami` (key saved in `~/.config/beevm/config.json`), `init` (starter function); `--json` on the list commands. Operator commands are in `beevmd` (`serve`, `tenant`, `key`, `snapshot`, `bench`, `doctor`) | Go + `spf13/cobra` (`beevm`), `flag` (`beevmd`) |
 | 15 | **Web Dashboard** *(optional module)* | Live VM grid (state colours), pool sizes, invoke button with timing, cold vs warm latency chart, density counter | **React + Vite + TypeScript**, **Recharts**, plain CSS (Tailwind dropped in M11); built to static files in `web/dist`, served by `beevmd --ui-dir` at `/ui/` (no embedding); Node 24 pinned in WSL for the build |
 | 16 | **Grafana stack** *(optional module)* | Pre-built dashboard JSON for latency/density/pool metrics | **Prometheus + Grafana**: pinned release tarballs via `make monitoring` (no Docker, the tested path) or Docker Compose (profile `monitoring`) |
-| 17 | **Benchmarks** | Cold boot vs snapshot restore vs warm hit; throughput; max VMs per node; isolation attack tests | Go bench tool (`cmd/beevm-bench`), **k6** for HTTP load, Python + **matplotlib** for charts |
+| 17 | **Benchmarks** | Cold boot vs snapshot restore vs warm hit; throughput; max VMs per node; isolation attack tests | `beevmd bench coldstart` and `beevmd bench load` (built in M6-M10); planned for M12: **k6** for HTTP load, Python + **matplotlib** for charts |
 | 18 | **Infra (cloud run)** | Spin up benchmark node reproducibly | **Terraform** (GCP N2 with nested virt, or AWS `c5.metal`/`i3en.metal`) + cloud-init setup script |
 
 **Swappable dashboards rule:** the web dashboard and Grafana talk to `beevmd` *only* through the public REST/SSE API and `/metrics`. No core code imports either. Deleting `web/` or `deploy/monitoring/` needs no other change (Makefile targets and Compose profiles are separate).
@@ -93,31 +93,38 @@ Project lives in `C:\Users\ommga\Desktop\ACC\BeeVM\` (currently holds only the c
 ## Repository layout (`BeeVM/`)
 
 ```
-cmd/beevmd/            daemon entrypoint
-cmd/beevm/             CLI
+cmd/beevmd/            server and operator commands: serve, tenant, key, snapshot, bench, doctor, boot, invoke
+cmd/beevm/             user CLI
 cmd/beevm-agent/       guest agent (built static, baked into rootfs)
-cmd/beevm-bench/       benchmark driver
 internal/api/          HTTP handlers, auth, SSE
+internal/apiclient/    Go client for the API (used by the CLI and bench load)
+internal/apitypes/     JSON types and header names shared by server and clients
 internal/registry/     SQLite function + tenant store
+internal/codestore/    local code cache in front of the artifact store
 internal/store/        S3/MinIO artifact client
-internal/pool/         scheduler, warm pools, VM state machine
-internal/snapshot/     snapshot create/restore/backup
-internal/vmm/          firecracker-go-sdk wrapper
+internal/pool/         warm pools, VM state machine, per-tenant cap
+internal/runner/       cold, snapshot and warm runners (how a call gets a VM)
+internal/snapshot/     runtime + function snapshots
+internal/vmm/          firecracker-go-sdk wrapper, own API client, jailer
 internal/netns/        netns, TAP, veth, nftables
-internal/isolation/    jailer config, cgroups v2
+internal/isolation/    slots, cgroups v2, jailer setup
+internal/agent/        guest agent server and runtime shims (no vsock code)
 internal/agentproto/   shared request/response types (host ↔ agent)
+internal/pkg/          runtimes, zip package rules
+internal/events/       publish/subscribe hub for the event stream
 internal/metrics/      Prometheus collectors
 guest/kernel/          kernel fetch script + config notes
 guest/rootfs/          build-rootfs.sh [binary|python|node] + init
 guest/shims/           python & node handler shims (shim.py, shim.js)
-examples/functions/    hello-python, hello-node, hello-go-binary, cpu-heavy, memory-hog
+examples/functions/    hello-python, hello-node, hello-go-binary, testfn, matrix, attacks (forkbomb, memhog, cpuhog, netprobe, hostread)
 web/                   (optional) React dashboard
 deploy/monitoring/     (optional) prometheus.yml, grafana dashboards
-deploy/docker-compose.yml   MinIO (+ monitoring profile)
-bench/                 k6 scripts, plot_results.py, results/
-infra/terraform/       cloud benchmark node
-scripts/setup-wsl.sh   WSL2 + KVM + Firecracker install
-docs/                  architecture.md, demo-script.md, report notes
+deploy/docker-compose.yml   MinIO (+ monitoring profile; untested, the tested path needs no Docker)
+bench/results/         benchmark output (git-ignored); k6 scripts and plot_results.py planned for M12
+scripts/               setup-wsl.sh, demo.sh (make demo), minio.sh, monitoring.sh, ui.sh, test-isolation.sh
+docs/                  architecture.md, milestones.md, progress.md
+developer-guide/       guide.md (build guide), demo.md (demo script)
+infra/terraform/       (planned, M13) cloud benchmark node
 Makefile
 ```
 
@@ -125,12 +132,14 @@ Makefile
 
 ## Environment
 
-- **Dev:** Windows 11 → WSL2 **Ubuntu 24.04**, `nestedVirtualization=true` in `%UserProfile%\.wslconfig`, `/dev/kvm` accessible, Docker (for MinIO, Grafana, rootfs builds), Go 1.23+, Node 24 (dashboard build only; pinned tarball via `make ui`).
+- **Dev:** Windows 11 → WSL2 **Ubuntu 24.04**, `nestedVirtualization=true` in `%UserProfile%\.wslconfig`, `/dev/kvm` accessible, no Docker (rootfs via `apk.static` + fakeroot, MinIO built from source, Prometheus/Grafana as pinned tarballs), Go 1.24+ (1.27.3 installed), Node 24 (dashboard build only; pinned tarball via `make ui`).
 - **Benchmark:** Terraform-created Linux node (GCP N2 nested-virt for cheap runs; optional short `i3en.metal` run to match the table), AWS S3 bucket instead of MinIO.
 
 ---
 
 ## Build milestones
+
+(The original plan. `docs/milestones.md` splits it into 13 session-sized milestones and supersedes this list.)
 
 1. **Foundations** — setup script, kernel + base rootfs, boot one MicroVM by hand, then from Go (`internal/vmm`).
 2. **Agent + invoke** — `beevm-agent` over vsock, binary runtime, `POST /invoke` end-to-end (boot path).
@@ -148,7 +157,7 @@ Makefile
 
 - `go test ./...` for unit tests (pool state machine, registry, auth); integration tests tagged `//go:build kvm` that need `/dev/kvm`.
 - **Functional:** deploy and invoke `hello-python`, `hello-node`, `hello-go-binary` via CLI and curl; check correct outputs.
-- **Cold start:** `beevm bench coldstart` → report p50/p99 for boot vs snapshot restore vs warm; pass if restore p99 < 50 ms on the benchmark node.
+- **Cold start:** `beevmd bench coldstart` → report p50/p99 for boot vs snapshot restore vs warm; pass if restore p99 < 50 ms on the benchmark node.
 - **Isolation tests** (examples in `examples/functions/`): fork bomb stopped inside the guest (its processes are guest processes the host never sees: the guest's per-user process limit stops it, the agent kills leftovers; the host's `pids.max` only caps Firecracker's own threads); memory hog killed by the guest's OOM killer, with `memory.max` as the host-side limit, without affecting neighbours; CPU hog throttled by `cpu.max`; tenant A cannot reach tenant B's VM over the network; guest cannot see host filesystem (jailer chroot).
 - **Density:** start idle 128 MB VMs until memory limit; report max VMs/node and memory per VM (snapshot pages shared via mmap).
 - **UI check:** dashboard shows VMs changing state live during a k6 load run; Grafana panels match.

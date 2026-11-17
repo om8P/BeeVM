@@ -506,3 +506,90 @@ func TestConcurrentUseRespectsTheLimit(t *testing.T) {
 	}
 	_ = p.Close(context.Background())
 }
+
+func newCappedPool(maxVMs, perTenant int) *Pool {
+	c := &clock{now: time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)}
+	return newPool(Config{MaxVMs: maxVMs, MaxVMsPerTenant: perTenant, KeepAlive: time.Minute,
+		QueueWait: 50 * time.Millisecond, Now: c.Now})
+}
+
+func fnKey(tenant, fn int64) Key {
+	return Key{TenantID: tenant, FunctionID: fn, CodeSHA256: fmt.Sprint(fn), MemoryMiB: 128, VCPUs: 1}
+}
+
+// A tenant at its cap makes room from its own idle VMs, even when the node has free slots,
+// and never touches another tenant's warm VMs.
+func TestTenantCapEvictsOnlyItsOwnVMs(t *testing.T) {
+	p := newCappedPool(4, 2)
+	f := &factory{}
+	ctx := context.Background()
+	for _, k := range []Key{fnKey(1, 1), fnKey(1, 2), fnKey(2, 3)} { // vm-1, vm-2 (tenant 1), vm-3 (tenant 2)
+		l, err := p.Acquire(ctx, k, f.create)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.Release(l, true)
+	}
+	l, err := p.Acquire(ctx, fnKey(1, 4), f.create) // tenant 1's third function
+	if err != nil {
+		t.Fatalf("tenant at its cap with idle VMs should evict one of them: %v", err)
+	}
+	defer p.Release(l, true)
+	if !f.vms[0].destroyed.Load() && !f.vms[1].destroyed.Load() {
+		t.Error("one of tenant 1's idle VMs should have been evicted")
+	}
+	if f.vms[2].destroyed.Load() {
+		t.Error("tenant 2's VM must never be evicted for tenant 1's cap")
+	}
+	waitFor(t, "tenant 1 back at its cap", func() bool {
+		return len(p.Stats(1)) == 2
+	})
+}
+
+// With all of its VMs busy, a tenant at its cap waits (ErrBusy) although the node has room;
+// another tenant still gets a VM at once.
+func TestTenantCapBusyWhileOthersStillRun(t *testing.T) {
+	p := newCappedPool(4, 1)
+	f := &factory{}
+	ctx := context.Background()
+	l1, err := p.Acquire(ctx, fnKey(1, 1), f.create)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Acquire(ctx, fnKey(1, 2), f.create); !errors.Is(err, ErrBusy) {
+		t.Fatalf("tenant 1 at its cap: want ErrBusy, got %v", err)
+	}
+	l2, err := p.Acquire(ctx, fnKey(2, 3), f.create)
+	if err != nil {
+		t.Fatalf("tenant 2 has room: %v", err)
+	}
+	p.Release(l2, true)
+	// A warm hit never needs a new slot, so it works at the cap.
+	p.Release(l1, true)
+	l3, err := p.Acquire(ctx, fnKey(1, 1), f.create)
+	if err != nil || !l3.Warm {
+		t.Fatalf("warm hit at the cap: %+v %v", l3, err)
+	}
+	p.Release(l3, true)
+}
+
+func TestTenantCapLimitsPrewarm(t *testing.T) {
+	p := newCappedPool(8, 3)
+	f := &factory{}
+	n, err := p.Prewarm(context.Background(), fnKey(1, 1), 5, f.create)
+	if n != 3 || err != nil {
+		t.Errorf("prewarm 5 with a cap of 3: started %d, %v", n, err)
+	}
+	if n, err := p.Prewarm(context.Background(), fnKey(1, 2), 1, f.create); n != 0 || !errors.Is(err, ErrBusy) {
+		t.Errorf("prewarm at the cap: started %d, %v", n, err)
+	}
+	if n, _ := p.Prewarm(context.Background(), fnKey(2, 3), 2, f.create); n != 2 {
+		t.Errorf("another tenant: started %d", n)
+	}
+}
+
+func TestRecycleReasonQuota(t *testing.T) {
+	if RecycleReason("evicted (tenant limit)") != ReasonQuota {
+		t.Error("tenant-limit evictions need their own label")
+	}
+}

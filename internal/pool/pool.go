@@ -54,11 +54,15 @@ type CreateFunc func(ctx context.Context) (Instance, error)
 
 // Config sets the pool's limits.
 type Config struct {
-	MaxVMs    int           // VMs on this node, in any state; at least 1
-	KeepAlive time.Duration // how long an idle VM is kept; default 60 s
-	QueueWait time.Duration // how long a call waits for a free slot before ErrBusy; default 5 s
-	Now       func() time.Time
-	Logger    *slog.Logger
+	MaxVMs int // VMs on this node, in any state; at least 1
+	// MaxVMsPerTenant (optional) caps one tenant's VMs, in any state; 0 = no cap. A tenant at
+	// its cap only reuses or evicts its own idle VMs, else waits (ErrBusy): it can never take
+	// more of the node and push other tenants' warm VMs out.
+	MaxVMsPerTenant int
+	KeepAlive       time.Duration // how long an idle VM is kept; default 60 s
+	QueueWait       time.Duration // how long a call waits for a free slot before ErrBusy; default 5 s
+	Now             func() time.Time
+	Logger          *slog.Logger
 	// OnRecycle (optional) is told every time a VM is thrown away, with a short reason (see
 	// RecycleReason). It is called with the pool's lock held: it must be quick and must not
 	// call the pool (incrementing a metric is fine).
@@ -81,6 +85,7 @@ type StateChange struct {
 const (
 	ReasonKeepAlive = "keep_alive" // idle longer than KeepAlive
 	ReasonEvicted   = "evicted"    // node full, least recently used idle VM
+	ReasonQuota     = "quota"      // tenant at MaxVMsPerTenant, its own least recently used idle VM
 	ReasonUnhealthy = "unhealthy"  // timed out, agent error, caller hung up
 	ReasonDrained   = "drained"    // function redeployed or deleted
 	ReasonClosing   = "closing"    // pool shutting down
@@ -95,6 +100,8 @@ func RecycleReason(text string) string {
 		return ReasonKeepAlive
 	case "evicted (node full)":
 		return ReasonEvicted
+	case "evicted (tenant limit)":
+		return ReasonQuota
 	case "unhealthy after a call":
 		return ReasonUnhealthy
 	case "function changed or removed":
@@ -219,6 +226,22 @@ func (p *Pool) usedLocked() int {
 	return n
 }
 
+// tenantUsedLocked counts one tenant's VMs that take a slot.
+func (p *Pool) tenantUsedLocked(tenantID int64) int {
+	n := 0
+	for e := range p.vms {
+		if e.state.usesSlot() && e.key.TenantID == tenantID {
+			n++
+		}
+	}
+	return n
+}
+
+// tenantFullLocked reports whether the tenant is at its cap (never true without a cap).
+func (p *Pool) tenantFullLocked(tenantID int64) bool {
+	return p.cfg.MaxVMsPerTenant > 0 && p.tenantUsedLocked(tenantID) >= p.cfg.MaxVMsPerTenant
+}
+
 // mustMove is move for transitions the pool's own logic guarantees; an error is a bug.
 // Callers update calls and lastUsed before moving, so the change report shows the new values.
 func (p *Pool) mustMove(e *vmEntry, to State) {
@@ -258,7 +281,8 @@ func infoLocked(e *vmEntry) VMInfo {
 
 // Acquire returns a VM for key: an idle one if there is one (warm), otherwise a new one made
 // with create. When the node is full it first throws away the least recently used idle VM of
-// any function; if nothing is idle it waits up to QueueWait (ErrBusy) or until ctx ends.
+// any function; if nothing is idle it waits up to QueueWait (ErrBusy) or until ctx ends. A
+// tenant at MaxVMsPerTenant makes room only from its own idle VMs.
 func (p *Pool) Acquire(ctx context.Context, key Key, create CreateFunc) (*Lease, error) {
 	var timeout <-chan time.Time
 	for {
@@ -276,13 +300,20 @@ func (p *Pool) Acquire(ctx context.Context, key Key, create CreateFunc) (*Lease,
 		}
 		// 2. Full? Make room by evicting the least recently used idle VM. It still uses its
 		// slot until it is destroyed, so we wait for that below (the broadcast wakes us).
-		if p.usedLocked() >= p.cfg.MaxVMs {
+		// A tenant at its own cap may only give up one of its own VMs.
+		tenantFull := p.tenantFullLocked(key.TenantID)
+		switch {
+		case tenantFull:
+			if victim := p.oldestIdleOfLocked(key.TenantID); victim != nil {
+				p.recycleLocked(victim, "evicted (tenant limit)")
+			}
+		case p.usedLocked() >= p.cfg.MaxVMs:
 			if victim := p.oldestIdleLocked(); victim != nil {
 				p.recycleLocked(victim, "evicted (node full)")
 			}
 		}
-		// 3. A free slot: create a new VM.
-		if p.usedLocked() < p.cfg.MaxVMs {
+		// 3. A free slot (on the node and within the tenant's cap): create a new VM.
+		if !tenantFull && p.usedLocked() < p.cfg.MaxVMs {
 			e := p.reserveLocked(key)
 			p.mu.Unlock()
 			return p.finishCreate(ctx, e, create, Busy)
@@ -438,10 +469,13 @@ func (p *Pool) newestIdleLocked(key Key) *vmEntry {
 }
 
 // oldestIdleLocked returns the least recently used idle VM of any function (LRU), or nil.
-func (p *Pool) oldestIdleLocked() *vmEntry {
+func (p *Pool) oldestIdleLocked() *vmEntry { return p.oldestIdleOfLocked(0) }
+
+// oldestIdleOfLocked is oldestIdleLocked for one tenant's VMs (tenantID <= 0: any tenant).
+func (p *Pool) oldestIdleOfLocked(tenantID int64) *vmEntry {
 	var lru *vmEntry
 	for e := range p.vms {
-		if e.state == Idle && (lru == nil || e.lastUsed.Before(lru.lastUsed)) {
+		if e.state == Idle && (tenantID <= 0 || e.key.TenantID == tenantID) && (lru == nil || e.lastUsed.Before(lru.lastUsed)) {
 			lru = e
 		}
 	}
@@ -449,7 +483,8 @@ func (p *Pool) oldestIdleLocked() *vmEntry {
 }
 
 // Prewarm creates up to n idle VMs for key so that the next calls are warm. It only uses free
-// slots (it never evicts other functions' VMs and never waits) and returns how many it started.
+// slots within the tenant's cap (it never evicts other functions' VMs and never waits) and
+// returns how many it started.
 // The new VMs expire after KeepAlive like any idle VM.
 func (p *Pool) Prewarm(ctx context.Context, key Key, n int, create CreateFunc) (int, error) {
 	p.mu.Lock()
@@ -458,7 +493,7 @@ func (p *Pool) Prewarm(ctx context.Context, key Key, n int, create CreateFunc) (
 		return 0, ErrClosed
 	}
 	var reserved []*vmEntry
-	for i := 0; i < n && p.usedLocked() < p.cfg.MaxVMs; i++ {
+	for i := 0; i < n && p.usedLocked() < p.cfg.MaxVMs && !p.tenantFullLocked(key.TenantID); i++ {
 		reserved = append(reserved, p.reserveLocked(key))
 	}
 	p.mu.Unlock()

@@ -730,8 +730,9 @@ func testHostMemoryLimit(t *testing.T, env *isoEnv) {
 		t.Errorf("VM %s still listed 10 s after its process was killed", vm.ID)
 	}
 	var ae *apiclient.APIError
-	if !errors.As(err, &ae) || ae.Status != 500 {
-		t.Errorf("want 500 (the VM died, not the function), got %v", err)
+	// The function made its VM go over the host limit: a function failure (502) that says so.
+	if !errors.As(err, &ae) || ae.Status != 502 || !strings.Contains(ae.Message, "host limit") {
+		t.Errorf("want 502 naming the host limit, got %v", err)
 	}
 	if _, _, err := invokeJSON(t, env.bob, "echo", `{"mode":"echo"}`); err != nil {
 		t.Errorf("neighbour failed: %v", err)

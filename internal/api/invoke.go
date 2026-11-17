@@ -3,12 +3,15 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
@@ -125,6 +128,9 @@ func (s *Server) invoke(w http.ResponseWriter, r *http.Request) {
 		h.Set(apitypes.HeaderSnapshot, res.Snapshot)
 	}
 	h.Set(apitypes.HeaderLoadMS, strconv.FormatInt(res.LoadMS, 10))
+	if strings.EqualFold(r.Header.Get(apitypes.HeaderLogType), apitypes.LogTypeTail) {
+		setLogTail(h, res.Stderr)
+	}
 
 	if res.FunctionError != "" {
 		code := res.ExitCode
@@ -134,4 +140,28 @@ func (s *Server) invoke(w http.ResponseWriter, r *http.Request) {
 	h.Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(res.Output)
+}
+
+// setLogTail puts the end of a function's log into the response headers (see
+// apitypes.HeaderLogResult). The cut is moved forward to the start of a UTF-8 character, so the
+// decoded text never begins with half a character.
+func setLogTail(h http.Header, log string) {
+	h.Set(apitypes.HeaderLogBytes, strconv.Itoa(len(log)))
+	if log == "" {
+		return
+	}
+	tail := logTail(log, apitypes.MaxLogTailBytes)
+	h.Set(apitypes.HeaderLogResult, base64.StdEncoding.EncodeToString([]byte(tail)))
+}
+
+// logTail returns at most max bytes from the end of s, starting at a character boundary.
+func logTail(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	start := len(s) - max
+	for i := 0; i < utf8.UTFMax-1 && start < len(s) && !utf8.RuneStart(s[start]); i++ {
+		start++
+	}
+	return s[start:]
 }

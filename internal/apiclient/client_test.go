@@ -164,3 +164,28 @@ func TestConnectionRefusedIsAnError(t *testing.T) {
 		t.Error("expected an error")
 	}
 }
+
+func TestInvokeWithLogs(t *testing.T) {
+	c, fr, _ := setup(t)
+	ctx := context.Background()
+	c.Deploy(ctx, "hello", bytes.NewReader(elf(5)), apitypes.FunctionConfig{})
+	fr.result.Stderr = "hello-go-binary: greeting Om\n"
+
+	res, err := c.Invoke(ctx, "hello", nil)
+	if err != nil || res.Log != "" || res.LogBytes != 0 {
+		t.Errorf("plain Invoke must not ask for logs: %+v, %v", res, err)
+	}
+	res, err = c.InvokeWith(ctx, "hello", nil, InvokeOptions{Logs: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Log != "hello-go-binary: greeting Om\n" || res.LogBytes != int64(len(res.Log)) {
+		t.Errorf("log %q (%d bytes)", res.Log, res.LogBytes)
+	}
+
+	fr.result.Stderr = strings.Repeat("x", apitypes.MaxLogTailBytes+100)
+	res, err = c.InvokeWith(ctx, "hello", nil, InvokeOptions{Logs: true})
+	if err != nil || len(res.Log) != apitypes.MaxLogTailBytes || res.LogBytes != int64(apitypes.MaxLogTailBytes+100) {
+		t.Errorf("long log: %d of %d bytes, %v", len(res.Log), res.LogBytes, err)
+	}
+}

@@ -170,12 +170,13 @@ func newDeploy(s *settings) *cobra.Command {
 
 func newInvoke(s *settings) *cobra.Command {
 	var payload, payloadFile string
-	var verbose bool
+	var verbose, logs bool
 	cmd := &cobra.Command{
 		Use:   "invoke <name>",
 		Short: "Run a function and print its JSON output",
 		Long: "The payload comes from --payload, or --payload-file, or standard input when something is piped in;\n" +
-			"otherwise the function gets no input (null). With -v, timings are printed to stderr.",
+			"otherwise the function gets no input (null). With -l, the end of the function's log (what it\n" +
+			"printed) goes to stderr; with -v, the log and the timings do. A failed call always shows its log.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			body, err := readPayload(payload, payloadFile)
@@ -187,7 +188,7 @@ func newInvoke(s *settings) *cobra.Command {
 				return err
 			}
 			start := time.Now()
-			res, err := c.Invoke(cmd.Context(), args[0], body)
+			res, err := c.InvokeWith(cmd.Context(), args[0], body, apiclient.InvokeOptions{Logs: logs || verbose})
 			rtt := time.Since(start)
 			if err != nil {
 				var ae *apiclient.APIError
@@ -198,6 +199,9 @@ func newInvoke(s *settings) *cobra.Command {
 					return &exitError{1, "function failed: " + ae.Message}
 				}
 				return err
+			}
+			if logs || verbose {
+				printLog(os.Stderr, res.Log, res.LogBytes)
 			}
 			fmt.Println(strings.TrimSpace(string(res.Output)))
 			if verbose {
@@ -224,8 +228,23 @@ func newInvoke(s *settings) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&payload, "payload", "", "JSON payload")
 	cmd.Flags().StringVar(&payloadFile, "payload-file", "", "read the JSON payload from this file")
-	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "print timings to stderr")
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "print the function's log and the timings to stderr")
+	cmd.Flags().BoolVarP(&logs, "logs", "l", false, "print the end of the function's log to stderr")
 	return cmd
+}
+
+// printLog writes a successful call's log under a "function log:" title. total is the whole
+// log's size; when the server sent only its end, a note says how much is missing. Nothing is
+// printed when the function printed nothing.
+func printLog(w io.Writer, log string, total int64) {
+	if log == "" {
+		return
+	}
+	title := "function log:"
+	if missing := total - int64(len(log)); missing > 0 {
+		title = fmt.Sprintf("function log (last %s of %s):", humanSize(int64(len(log))), humanSize(total))
+	}
+	fmt.Fprintf(w, "%s\n%s\n", title, strings.TrimRight(log, "\n"))
 }
 
 // readPayload picks the payload source: flag, file, piped stdin, or nothing.
@@ -247,7 +266,8 @@ func readPayload(payload, file string) ([]byte, error) {
 // ---------------------------------------------------------------- ls and rm
 
 func newLs(s *settings) *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "ls",
 		Short: "List your functions",
 		Args:  cobra.NoArgs,
@@ -259,6 +279,9 @@ func newLs(s *settings) *cobra.Command {
 			fns, err := c.List(cmd.Context())
 			if err != nil {
 				return err
+			}
+			if asJSON {
+				return printJSON(os.Stdout, fns)
 			}
 			if len(fns) == 0 {
 				fmt.Println("no functions yet; deploy one with: beevm deploy <name> <binary|folder>")
@@ -273,6 +296,8 @@ func newLs(s *settings) *cobra.Command {
 			return tw.Flush()
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
+	return cmd
 }
 
 // ---------------------------------------------------------------- warm pool
@@ -304,7 +329,8 @@ func newPrewarm(s *settings) *cobra.Command {
 }
 
 func newVMs(s *settings) *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "vms",
 		Short: "List your VMs in the warm pool",
 		Args:  cobra.NoArgs,
@@ -316,6 +342,9 @@ func newVMs(s *settings) *cobra.Command {
 			vms, err := c.VMs(cmd.Context())
 			if err != nil {
 				return err
+			}
+			if asJSON {
+				return printJSON(os.Stdout, vms)
 			}
 			if len(vms) == 0 {
 				fmt.Println("no VMs running")
@@ -338,6 +367,8 @@ func newVMs(s *settings) *cobra.Command {
 			return tw.Flush()
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
+	return cmd
 }
 
 func newRm(s *settings) *cobra.Command {

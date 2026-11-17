@@ -141,3 +141,37 @@ func TestColdRunnerCancelKillsTheVM(t *testing.T) {
 		t.Errorf("firecracker still running for %s: %s", cfg.BaseDir, out)
 	}
 }
+
+// A VM whose process dies during a call (on an isolated server: the host's memory.max) is a
+// function failure the caller can see, not an internal error.
+func TestCallWhenTheVMDiesIsAFunctionFailure(t *testing.T) {
+	cfg := baseConfig(t)
+	req := Request{CodePath: buildFunction(t, "testfn"), Payload: json.RawMessage(`{"mode":"sleep","ms":5000}`),
+		MemoryMiB: 128, VCPUs: 1, TimeoutMS: 10000}
+	ctx := context.Background()
+	var res Result
+	vm, err := bootReady(ctx, agentConfig(cfg), req, &res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vm.Cleanup(false)
+	if err := putCode(ctx, vm, req, &res); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		if p, err := os.FindProcess(vm.PID()); err == nil {
+			p.Kill() // what the kernel does when the cgroup's memory.max is hit
+		}
+	}()
+	start := time.Now()
+	if err := callFunction(ctx, vm, req, &res); err != nil {
+		t.Fatalf("want a function failure, got the error %v", err)
+	}
+	if res.FunctionError != VMStoppedError || res.ExitCode != 137 || !strings.Contains(res.Stderr, "host limits") {
+		t.Errorf("result: %+v", res)
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Errorf("noticed after %v; the function would have run 5 s", took)
+	}
+}

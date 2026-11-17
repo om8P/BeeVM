@@ -1,10 +1,12 @@
 // Command beevm is the user-facing CLI: deploy a function, invoke it, list and remove functions,
 // prewarm VMs and list them.
 //
-// It talks to a running beevmd over HTTP. Settings come from flags or the environment:
+// It talks to a running beevmd over HTTP. Settings come from flags, the environment, or the
+// file saved by `beevm login`, in that order:
 //
 //	BEEVM_URL      server address (default http://127.0.0.1:8080)
 //	BEEVM_API_KEY  your API key (the operator creates it with: beevmd tenant add <name>)
+//	BEEVM_CONFIG   where login saves them (default ~/.config/beevm/config.json)
 package main
 
 import (
@@ -56,18 +58,36 @@ func newRoot() *cobra.Command {
 		SilenceUsage:  true, // do not print the whole help on every error
 		SilenceErrors: true, // main prints errors itself
 	}
-	root.PersistentFlags().StringVar(&s.url, "url", "", "server address (default $BEEVM_URL or http://127.0.0.1:8080)")
-	root.PersistentFlags().StringVar(&s.key, "key", "", "API key (default $BEEVM_API_KEY)")
-	root.AddCommand(newDeploy(&s), newInvoke(&s), newLs(&s), newRm(&s), newPrewarm(&s), newVMs(&s))
+	root.PersistentFlags().StringVar(&s.url, "url", "", "server address (default $BEEVM_URL, then the saved login, then "+defaultURL+")")
+	root.PersistentFlags().StringVar(&s.key, "key", "", "API key (default $BEEVM_API_KEY, then the saved login)")
+	root.AddCommand(newDeploy(&s), newInvoke(&s), newLs(&s), newGet(&s), newRm(&s), newPrewarm(&s), newVMs(&s),
+		newLogin(&s), newLogout(), newWhoami(&s), newInit())
 	return root
 }
 
-// client builds the API client from flags and environment.
+// defaultURL is the server address when nothing else says otherwise.
+const defaultURL = "http://127.0.0.1:8080"
+
+// resolve picks the server address and key: flag, then environment, then the file saved by
+// `beevm login`, then the default address.
+func (s *settings) resolve() (url, key string, err error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return "", "", err
+	}
+	url = firstNonEmpty(s.url, os.Getenv("BEEVM_URL"), cfg.URL, defaultURL)
+	key = firstNonEmpty(s.key, os.Getenv("BEEVM_API_KEY"), cfg.Key)
+	return url, key, nil
+}
+
+// client builds the API client from flags, environment and the saved login.
 func (s *settings) client() (*apiclient.Client, error) {
-	url := firstNonEmpty(s.url, os.Getenv("BEEVM_URL"), "http://127.0.0.1:8080")
-	key := firstNonEmpty(s.key, os.Getenv("BEEVM_API_KEY"))
+	url, key, err := s.resolve()
+	if err != nil {
+		return nil, err
+	}
 	if key == "" {
-		return nil, &exitError{2, "no API key: set BEEVM_API_KEY or use --key (the operator creates one with: beevmd tenant add <name>)"}
+		return nil, &exitError{2, "no API key: run beevm login, set BEEVM_API_KEY or use --key (the operator creates one with: beevmd tenant add <name>)"}
 	}
 	return apiclient.New(url, key), nil
 }

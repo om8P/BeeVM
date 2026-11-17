@@ -39,6 +39,8 @@ func main() {
 		os.Exit(runSnapshot(os.Args[2:]))
 	case "bench":
 		os.Exit(runBench(os.Args[2:]))
+	case "doctor":
+		os.Exit(runDoctor(os.Args[2:]))
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -51,6 +53,7 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: beevmd <command> [flags]")
 	fmt.Fprintln(os.Stderr, "commands:")
+	fmt.Fprintln(os.Stderr, "  doctor   check KVM, images, snapshots, tenants and the server, and say what to fix")
 	fmt.Fprintln(os.Stderr, "  boot     start one MicroVM, show its console, stop it and clean up")
 	fmt.Fprintln(os.Stderr, "  invoke   boot (or --restore) a VM, upload a function binary, run it (repeatedly), clean up")
 	fmt.Fprintln(os.Stderr, "  serve    run the HTTP API (deploy and invoke functions)")

@@ -83,6 +83,10 @@ func TestWarmRunnerKeepsOrRecycles(t *testing.T) {
 			return nil
 		}, false},
 		{"agent error", func(ctx context.Context, res *Result) error { return errors.New("invoke: connection reset") }, false},
+		{"vm stopped by a host limit", func(ctx context.Context, res *Result) error {
+			res.FunctionError, res.ExitCode = VMStoppedError, 137
+			return nil
+		}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -196,4 +200,25 @@ func TestWarmRunnerImplementsExtras(t *testing.T) {
 		t.Error("not a VMLister")
 	}
 	_ = r.(interface{ Close() error }).Close()
+}
+
+func TestExitedWithin(t *testing.T) {
+	closed := make(chan struct{})
+	close(closed)
+	if !exitedWithin(closed, 0) {
+		t.Error("closed channel: exited")
+	}
+	open := make(chan struct{})
+	start := time.Now()
+	if exitedWithin(open, 20*time.Millisecond) || time.Since(start) < 20*time.Millisecond {
+		t.Error("open channel: not exited, after waiting the grace time")
+	}
+	later := make(chan struct{})
+	go func() { time.Sleep(5 * time.Millisecond); close(later) }()
+	if !exitedWithin(later, time.Second) {
+		t.Error("closed during the grace time: exited")
+	}
+	if exitedWithin(nil, 0) {
+		t.Error("nil channel: not exited")
+	}
 }

@@ -3,9 +3,11 @@ BEEVM_HOME ?= $(HOME)/.beevm
 export BEEVM_HOME
 GO ?= /usr/local/go/bin/go
 
-.PHONY: help setup images kernel rootfs rootfs-python rootfs-node boot boot-test clean-images build examples test test-kvm test-isolation test-s3 vet minio minio-up minio-down monitoring monitoring-up monitoring-down ui ui-dev test-ui
+.PHONY: help demo doctor setup images kernel rootfs rootfs-python rootfs-node boot boot-test clean-images build examples test test-kvm test-isolation test-s3 vet minio minio-up minio-down monitoring monitoring-up monitoring-down ui ui-dev test-ui
 
 help:
+	@echo "make demo         build, check, start the server with three ready functions (Ctrl-C stops)"
+	@echo "make doctor       check KVM, images, snapshots, tenants, server; says what to fix"
 	@echo "make setup        one-time install (Go, Firecracker, kernel, rootfs); needs sudo"
 	@echo "make images       (re)build kernel + all rootfs images (binary, python, node)"
 	@echo "make boot         boot a MicroVM with the shell script and get a shell (reboot -f to exit)"
@@ -41,6 +43,13 @@ boot:
 
 boot-test:
 	bash scripts/boot-vm.sh --selftest
+
+# Build, check, start the server with tenant "demo" and three example functions (Ctrl-C stops).
+demo:
+	bash scripts/demo.sh
+
+doctor: build
+	./bin/beevmd doctor
 
 build:
 	$(GO) build -o bin/beevmd ./cmd/beevmd

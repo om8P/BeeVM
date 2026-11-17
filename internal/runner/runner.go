@@ -321,6 +321,33 @@ func summaryLine(runtime, text string) string {
 	return strings.TrimSpace(line)
 }
 
+// VMStoppedError is Result.FunctionError when the VM's process died during the call.
+const VMStoppedError = "the function's VM stopped during the call (killed by a host limit)"
+
+// vmExitGrace is how long to wait for the VM's process to be seen as gone after the agent
+// connection broke (the broken connection is usually noticed first).
+const vmExitGrace = 300 * time.Millisecond
+
+// exitedWithin reports whether exited is closed now or within d.
+func exitedWithin(exited <-chan struct{}, d time.Duration) bool {
+	if exited == nil {
+		return false
+	}
+	select { // already gone: say so, whatever d is (a select with both ready picks at random)
+	case <-exited:
+		return true
+	default:
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-exited:
+		return true
+	case <-t.C:
+		return false
+	}
+}
+
 // callFunction runs the already uploaded function once and fills in res.
 func callFunction(ctx context.Context, vm *vmm.VM, req Request, res *Result) error {
 	// The agent enforces the function's own limit; allow a little longer so its answer arrives.
@@ -329,6 +356,16 @@ func callFunction(ctx context.Context, vm *vmm.VM, req Request, res *Result) err
 	defer cancelCall()
 	out, err := vm.Agent().Invoke(callCtx, req.Payload, limit)
 	if err != nil {
+		// The VM's process died during the call: on an isolated server the host killed it for
+		// going over its cgroup limits (memory.max), which the function caused. That is a
+		// function failure (502), not a BeeVM error (500). The VM is not reused.
+		if ctx.Err() == nil && exitedWithin(vm.Exited(), vmExitGrace) {
+			res.ExitCode = 137 // like a process killed with SIGKILL
+			res.FunctionError = VMStoppedError
+			res.Stderr = "the MicroVM running this call stopped before the function answered; on an isolated server " +
+				"this means the VM went over its host limits (memory). Use less memory or deploy with a larger --memory."
+			return nil
+		}
 		return fmt.Errorf("invoke: %w", err)
 	}
 	res.Output, res.Stderr, res.ExitCode = out.Output, out.Stderr, out.ExitCode

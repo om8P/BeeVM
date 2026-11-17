@@ -50,13 +50,26 @@ func newLogger(level, format string) (*slog.Logger, error) {
 		return nil, fmt.Errorf("--log-level must be debug, info, warn or error, not %q", level)
 	}
 	opts := &slog.HandlerOptions{Level: lv}
+	if format == "auto" {
+		// People reading a terminal get text; log collectors (a pipe or a file) get JSON.
+		format = "json"
+		if isTerminal(os.Stderr) {
+			format = "text"
+		}
+	}
 	switch format {
 	case "json":
 		return slog.New(slog.NewJSONHandler(os.Stderr, opts)), nil
 	case "text":
 		return slog.New(slog.NewTextHandler(os.Stderr, opts)), nil
 	}
-	return nil, fmt.Errorf("--log-format must be json or text, not %q", format)
+	return nil, fmt.Errorf("--log-format must be auto, json or text, not %q", format)
+}
+
+// isTerminal reports whether f is a terminal (not a pipe or a file).
+func isTerminal(f *os.File) bool {
+	st, err := f.Stat()
+	return err == nil && st.Mode()&os.ModeCharDevice != 0
 }
 
 // runServe starts the HTTP API.
@@ -64,6 +77,7 @@ func runServe(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := fs.String("addr", "127.0.0.1:8080", "address to listen on (localhost only by default)")
 	maxVMs := fs.Int("max-vms", 8, "most VMs running at the same time")
+	maxPerTenant := fs.Int("max-vms-per-tenant", 0, "warm runner: most VMs one tenant may have, so one tenant cannot push out the others' warm VMs; 0 = no limit")
 	queueWait := fs.Duration("queue-wait", 5*time.Second, "how long a call waits for a free VM slot before getting 503")
 	runnerKind := fs.String("runner", "warm", "how calls get a VM: warm (keep VMs between calls, new ones restored from a snapshot), snapshot (restore for every call) or cold (full boot every call)")
 	keepAlive := fs.Duration("keep-alive", 60*time.Second, "warm runner: how long an idle VM is kept for its function's next call")
@@ -75,8 +89,8 @@ func runServe(args []string) int {
 	isoFlags := addIsolationFlags(fs)
 	withMetrics := fs.Bool("metrics", true, "serve Prometheus metrics at GET /metrics on --addr (no API key: keep --addr on localhost or firewalled)")
 	logLevel := fs.String("log-level", "info", "debug, info, warn or error")
-	logFormat := fs.String("log-format", "json", "json (one JSON object per line) or text")
-	uiDir := fs.String("ui-dir", "web/dist", "serve the web dashboard from this folder at /ui/ if it was built (make ui); empty = off")
+	logFormat := fs.String("log-format", "auto", "auto (text on a terminal, JSON otherwise), json (one JSON object per line) or text")
+	uiDir := fs.String("ui-dir", "web/dist", "serve the web dashboard from this folder at /ui/ if it was built (make ui); a relative path is also looked for next to the repository of this binary; empty = off")
 	_ = fs.Parse(args)
 
 	logger, err := newLogger(*logLevel, *logFormat)
@@ -224,7 +238,7 @@ func runServe(args []string) int {
 			}
 			run = s
 		} else {
-			pcfg := pool.Config{MaxVMs: *maxVMs, KeepAlive: *keepAlive, QueueWait: *queueWait, Logger: logger}
+			pcfg := pool.Config{MaxVMs: *maxVMs, MaxVMsPerTenant: *maxPerTenant, KeepAlive: *keepAlive, QueueWait: *queueWait, Logger: logger}
 			if mets != nil {
 				pcfg.OnRecycle = mets.ObserveRecycle
 			}
@@ -252,9 +266,11 @@ func runServe(args []string) int {
 		}
 	}
 
-	handler := api.New(api.Deps{
+	apiServer := api.New(api.Deps{
 		Registry: reg, Code: code, Logger: logger, Runner: run, Metrics: mets, Events: hub,
-	}).Handler()
+	})
+	handler := apiServer.Handler()
+	*uiDir = findUIDir(*uiDir, os.Executable)
 	handler, withDashboard := withUI(handler, *uiDir)
 	if !withDashboard && *uiDir != "" {
 		logger.Info("web dashboard not built, serving the API only (make ui)", "ui_dir", *uiDir)
@@ -268,7 +284,18 @@ func runServe(args []string) int {
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
-	logger.Info("listening", "addr", *addr, "metrics", *withMetrics, "ui", withDashboard, "max_vms", *maxVMs, "runner", *runnerKind, "keep_alive", keepAlive.String(), "runtimes", append([]string{agentproto.RuntimeBinary}, available...), "home", home, "isolation", *isoFlags.mode)
+
+	// Functions deployed earlier get their function snapshot back if it is missing (after
+	// `make images`, or a build that failed): after the runtime snapshots, in the background.
+	go func() {
+		startup.Wait()
+		if n, err := apiServer.PrepareSnapshots(sigCtx); err != nil && sigCtx.Err() == nil {
+			logger.Warn("could not check the function snapshots", "error", err)
+		} else if n > 0 {
+			logger.Info("checked function snapshots of deployed functions; missing ones are built in the background", "functions", n)
+		}
+	}()
+	logger.Info("listening", "addr", *addr, "metrics", *withMetrics, "ui", withDashboard, "max_vms", *maxVMs, "max_vms_per_tenant", *maxPerTenant, "runner", *runnerKind, "keep_alive", keepAlive.String(), "runtimes", append([]string{agentproto.RuntimeBinary}, available...), "home", home, "isolation", *isoFlags.mode)
 
 	select {
 	case err := <-errCh:

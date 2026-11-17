@@ -134,10 +134,15 @@ func TestE2ERuntimeHelloPythonAndNode(t *testing.T) {
 			t.Logf("%s from function snapshot: ready %d ms, function %d ms, server total %d ms (snapshot built in %d ms)",
 				rt, res.BootMS, res.FunctionMS, res.TotalMS, fs[len(fs)-1].BuildMS)
 
-			// The next call reuses the VM.
-			if r, err := c.Invoke(ctx, fn, []byte(`{"name":"again"}`)); err != nil || r.StartKind != "warm" || r.VMID != res.VMID {
+			// The next call reuses the VM, and asks for the function's log (it prints a line).
+			r, err := c.InvokeWith(ctx, fn, []byte(`{"name":"again"}`), apiclient.InvokeOptions{Logs: true})
+			if err != nil || r.StartKind != "warm" || r.VMID != res.VMID {
 				t.Fatalf("second call: %+v %v", r, err)
 			}
+			if want := fn + ": greeting again"; !strings.Contains(r.Log, want) || r.LogBytes != int64(len(r.Log)) {
+				t.Fatalf("log of a successful call: %q (%d bytes), want %q", r.Log, r.LogBytes, want)
+			}
+			t.Logf("%s warm call log: %q", rt, r.Log)
 
 			// Without the function snapshot a VM comes from the runtime snapshot and imports.
 			waitVMs(t, c, 0, 3*time.Second)

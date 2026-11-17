@@ -4,6 +4,7 @@ package apiclient
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,9 +48,17 @@ func IsNotFound(err error) bool {
 
 // do sends a request and returns the response if its status is 2xx; other statuses become *APIError.
 func (c *Client) do(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
+	return c.doHeaders(ctx, method, path, body, contentType, nil)
+}
+
+// doHeaders is do with extra request headers.
+func (c *Client) doHeaders(ctx context.Context, method, path string, body io.Reader, contentType string, extra http.Header) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return nil, err
+	}
+	for k, v := range extra {
+		req.Header[k] = v
 	}
 	req.Header.Set("Authorization", "Bearer "+c.key)
 	if contentType != "" {
@@ -162,6 +171,15 @@ func (c *Client) Prewarm(ctx context.Context, name string, n int) (apitypes.Prew
 	return decodeBody[apitypes.PrewarmResult](resp)
 }
 
+// Me returns which tenant the client's API key belongs to.
+func (c *Client) Me(ctx context.Context) (apitypes.Me, error) {
+	resp, err := c.do(ctx, http.MethodGet, "/api/v1/me", nil, "")
+	if err != nil {
+		return apitypes.Me{}, err
+	}
+	return decodeBody[apitypes.Me](resp)
+}
+
 // VMs lists the caller's VMs in the warm pool.
 func (c *Client) VMs(ctx context.Context) ([]apitypes.VM, error) {
 	resp, err := c.do(ctx, http.MethodGet, "/api/v1/vms", nil, "")
@@ -185,12 +203,31 @@ type InvokeResult struct {
 	UploadMS   int64  // time spent sending the code into the VM
 	Snapshot   string // for "restore": "function" (code was already inside) or "runtime"
 	LoadMS     int64  // python/node: time spent importing the code
+
+	// Only filled when InvokeOptions.Logs was set:
+	Log      string // the end of the function's log (at most apitypes.MaxLogTailBytes)
+	LogBytes int64  // size of the whole log; more than len(Log) when it was cut
+}
+
+// InvokeOptions changes how Invoke calls a function.
+type InvokeOptions struct {
+	Logs bool // also return the end of the function's log (it costs a few KB of headers)
 }
 
 // Invoke runs a function. payload must be valid JSON (nil or empty means no input). A function
 // that fails comes back as *APIError with Status 502, ExitCode and Stderr set.
 func (c *Client) Invoke(ctx context.Context, name string, payload []byte) (InvokeResult, error) {
-	resp, err := c.do(ctx, http.MethodPost, "/invoke/"+url.PathEscape(name), strings.NewReader(string(payload)), "application/json")
+	return c.InvokeWith(ctx, name, payload, InvokeOptions{})
+}
+
+// InvokeWith is Invoke with options.
+func (c *Client) InvokeWith(ctx context.Context, name string, payload []byte, opts InvokeOptions) (InvokeResult, error) {
+	var extra http.Header
+	if opts.Logs {
+		extra = http.Header{}
+		extra.Set(apitypes.HeaderLogType, apitypes.LogTypeTail)
+	}
+	resp, err := c.doHeaders(ctx, http.MethodPost, "/invoke/"+url.PathEscape(name), strings.NewReader(string(payload)), "application/json", extra)
 	if err != nil {
 		return InvokeResult{}, err
 	}
@@ -200,11 +237,20 @@ func (c *Client) Invoke(ctx context.Context, name string, payload []byte) (Invok
 		return InvokeResult{}, err
 	}
 	ms := func(h string) int64 { n, _ := strconv.ParseInt(resp.Header.Get(h), 10, 64); return n }
-	return InvokeResult{
+	res := InvokeResult{
 		Output: json.RawMessage(out), VMID: resp.Header.Get(apitypes.HeaderVMID),
 		BootMS: ms(apitypes.HeaderBootMS), FunctionMS: ms(apitypes.HeaderFunctionMS), TotalMS: ms(apitypes.HeaderTotalMS),
 		CodeCache: resp.Header.Get(apitypes.HeaderCodeCache), FetchMS: ms(apitypes.HeaderFetchMS),
 		StartKind: resp.Header.Get(apitypes.HeaderStart), UploadMS: ms(apitypes.HeaderUploadMS),
 		Snapshot: resp.Header.Get(apitypes.HeaderSnapshot), LoadMS: ms(apitypes.HeaderLoadMS),
-	}, nil
+		LogBytes: ms(apitypes.HeaderLogBytes),
+	}
+	if enc := resp.Header.Get(apitypes.HeaderLogResult); enc != "" {
+		log, err := base64.StdEncoding.DecodeString(enc)
+		if err != nil {
+			return res, fmt.Errorf("server sent a log that is not valid base64: %w", err)
+		}
+		res.Log = string(log)
+	}
+	return res, nil
 }

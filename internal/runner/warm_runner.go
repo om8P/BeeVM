@@ -151,10 +151,11 @@ func (w *WarmRunner) Run(ctx context.Context, req Request) (Result, error) {
 //   - the caller hung up (the call may still be running inside the VM),
 //   - the function timed out (the agent kills its process group, but something it started
 //     in the background could survive),
-//   - a python/node runtime exited (the VM can no longer run the function).
+//   - a python/node runtime exited (the VM can no longer run the function),
+//   - the VM itself stopped (killed by a host limit).
 func healthyAfter(ctx context.Context, err error, res Result) bool {
 	return err == nil && ctx.Err() == nil && !strings.HasPrefix(res.FunctionError, "timeout after") &&
-		!strings.HasPrefix(res.FunctionError, "runtime exited")
+		!strings.HasPrefix(res.FunctionError, "runtime exited") && res.FunctionError != VMStoppedError
 }
 
 // newVM makes a ready VM with the function's code loaded: restored from the function's own

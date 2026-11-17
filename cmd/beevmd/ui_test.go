@@ -63,3 +63,38 @@ func TestWithUINotBuilt(t *testing.T) {
 		}
 	}
 }
+
+func TestFindUIDir(t *testing.T) {
+	repo := t.TempDir()
+	os.MkdirAll(filepath.Join(repo, "web", "dist"), 0o755)
+	os.WriteFile(filepath.Join(repo, "web", "dist", "index.html"), []byte("<html>"), 0o644)
+	os.MkdirAll(filepath.Join(repo, "bin"), 0o755)
+	exe := func() (string, error) { return filepath.Join(repo, "bin", "beevmd"), nil }
+
+	elsewhere := t.TempDir()
+	t.Chdir(elsewhere)
+	if got := findUIDir("web/dist", exe); got != filepath.Join(repo, "web", "dist") {
+		t.Errorf("from another folder: %q", got)
+	}
+	if got := findUIDir("", exe); got != "" {
+		t.Errorf("empty must stay off: %q", got)
+	}
+	if got := findUIDir("nothing/here", exe); got != "nothing/here" {
+		t.Errorf("not found anywhere: %q", got)
+	}
+	t.Chdir(repo)
+	if got := findUIDir("web/dist", exe); got != "web/dist" {
+		t.Errorf("found in the current folder: %q", got)
+	}
+}
+
+func TestNewLoggerFormats(t *testing.T) {
+	for _, f := range []string{"auto", "json", "text"} {
+		if _, err := newLogger("info", f); err != nil {
+			t.Errorf("%s: %v", f, err)
+		}
+	}
+	if _, err := newLogger("info", "xml"); err == nil {
+		t.Error("xml accepted")
+	}
+}

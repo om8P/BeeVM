@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/om8P/BeeVM/internal/apitypes"
 	"github.com/om8P/BeeVM/internal/codestore"
@@ -482,3 +484,71 @@ func TestPanicInHandlerBecomes500(t *testing.T) {
 type panicRunner struct{}
 
 func (panicRunner) Run(context.Context, runner.Request) (runner.Result, error) { panic("boom") }
+
+func TestInvokeLogsOnlyWhenAsked(t *testing.T) {
+	e := newEnv(t)
+	key := e.tenant("alice")
+	e.deploy(key, "f", elf("x"), "").Body.Close()
+	e.runner.result.Stderr = "line one\nline two\n"
+
+	resp := e.do("POST", "/invoke/f", key, strings.NewReader(`{}`), "")
+	status(t, resp, 200)
+	if resp.Header.Get(apitypes.HeaderLogResult) != "" || resp.Header.Get(apitypes.HeaderLogBytes) != "" {
+		t.Errorf("log headers sent without being asked: %v", resp.Header)
+	}
+
+	req, _ := http.NewRequest("POST", e.ts.URL+"/invoke/f", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set(apitypes.HeaderLogType, "Tail") // case does not matter
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status(t, resp, 200)
+	got, err := base64.StdEncoding.DecodeString(resp.Header.Get(apitypes.HeaderLogResult))
+	if err != nil || string(got) != "line one\nline two\n" {
+		t.Errorf("log %q, err %v", got, err)
+	}
+	if b := resp.Header.Get(apitypes.HeaderLogBytes); b != "18" {
+		t.Errorf("log bytes %q", b)
+	}
+}
+
+func TestInvokeEmptyLogSaysZero(t *testing.T) {
+	e := newEnv(t)
+	key := e.tenant("alice")
+	e.deploy(key, "f", elf("x"), "").Body.Close()
+
+	req, _ := http.NewRequest("POST", e.ts.URL+"/invoke/f", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set(apitypes.HeaderLogType, apitypes.LogTypeTail)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status(t, resp, 200)
+	if resp.Header.Get(apitypes.HeaderLogBytes) != "0" || resp.Header.Get(apitypes.HeaderLogResult) != "" {
+		t.Errorf("headers %v", resp.Header)
+	}
+}
+
+func TestLogTailCutsAtCharacterStart(t *testing.T) {
+	if got := logTail("short", 10); got != "short" {
+		t.Errorf("short log changed: %q", got)
+	}
+	if got := logTail("abcdef", 3); got != "def" {
+		t.Errorf("got %q", got)
+	}
+	// "é" is 2 bytes and "€" 3: a cut inside them must move forward to the next character.
+	if got := logTail("xé", 1); got != "" {
+		t.Errorf("half of é kept: %q", got)
+	}
+	if got := logTail("a€b", 3); got != "b" {
+		t.Errorf("got %q", got)
+	}
+	long := strings.Repeat("€", 2000) // 6,000 bytes
+	tail := logTail(long, apitypes.MaxLogTailBytes)
+	if len(tail) > apitypes.MaxLogTailBytes || !utf8.ValidString(tail) || len(tail) < apitypes.MaxLogTailBytes-3 {
+		t.Errorf("tail of %d bytes, valid %v", len(tail), utf8.ValidString(tail))
+	}
+}

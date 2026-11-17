@@ -20,6 +20,21 @@ const (
 	HeaderLoadMS     = "X-BeeVM-Load-Ms"    // python/node: time spent importing the code
 )
 
+// Function logs on a successful /invoke (a failed call has them in the 502 body instead). The
+// caller asks for them with the request header HeaderLogType: "tail"; the answer then has
+// HeaderLogBytes (size of the whole log the server got, "0" when the function printed nothing)
+// and, if the log is not empty, HeaderLogResult: the last MaxLogTailBytes of it, base64-encoded
+// (logs may hold any bytes, and headers may not). Same idea as AWS Lambda's X-Amz-Log-Type.
+const (
+	HeaderLogType   = "X-BeeVM-Log-Type"   // request: "tail" = send the end of the function's log
+	HeaderLogResult = "X-BeeVM-Log-Result" // response: base64 of the log's last MaxLogTailBytes
+	HeaderLogBytes  = "X-BeeVM-Log-Bytes"  // response: size of the whole log in bytes
+
+	LogTypeTail = "tail"
+	// MaxLogTailBytes keeps the header small enough for proxies (often limited to 8 KB).
+	MaxLogTailBytes = 4096
+)
+
 // Function describes a deployed function.
 type Function struct {
 	Name       string    `json:"name"`

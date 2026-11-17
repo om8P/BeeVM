@@ -2074,6 +2074,12 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 | Command | What it does |
 |---|---|
 | `make help` | list targets |
+| `make demo` | build, check, start the server with tenant `demo`, save the key for the CLI, deploy and call three example functions (Ctrl-C stops) |
+| `make doctor` / `./bin/beevmd doctor` | check KVM, images, disk, snapshots, tenants, server, leftover VMs; prints the fix for each problem |
+| `./bin/beevm login` / `logout` / `whoami` | save the API key (checked first) in `~/.config/beevm/config.json` / forget it / show the tenant |
+| `./bin/beevm init <python\|node\|binary> [folder]` | write a working starter function and print the deploy command |
+| `./bin/beevm get <name>`, `ls --json`, `vms --json` | one function's settings; JSON output for scripts |
+| `./bin/beevmd serve … [--max-vms-per-tenant N]` | cap one tenant's VMs so it cannot push out other tenants' warm VMs |
 | `make setup` | one-time install (sudo); safe to re-run |
 | `wsl --shutdown` (PowerShell) | restart WSL so the `kvm` group takes effect |
 | `make images` / `make kernel` / `make rootfs` / `make rootfs-python` / `make rootfs-node` | (re)build guest images (binary, python, node); each rootfs also rebuilds the guest agent |
@@ -2092,7 +2098,7 @@ All in the **WSL terminal**, in the repo folder, unless marked PowerShell.
 | `./bin/beevmd key add <tenant>` / `key ls` / `key revoke <prefix>` | milestone 4: manage API keys |
 | `./bin/beevmd serve [--addr A] [--max-vms N] [--queue-wait D] [--s3-*] [--runner warm\|snapshot\|cold] [--keep-alive D]` | milestone 4-7: run the HTTP service (warm pool by default: VMs kept `--keep-alive`, default 60 s, new ones restored from snapshots) |
 | `./bin/beevm deploy <name> <binary\|folder\|file.py\|file.js\|pkg.zip> [--runtime R] [--handler H] [--memory M] [--vcpus N] [--timeout D]` | upload a function (needs `BEEVM_API_KEY`); runtime detected from the path |
-| `./bin/beevm invoke <name> [--payload J \| --payload-file F] [-v]` | call a function; `-v` prints timings and code cache hit/miss |
+| `./bin/beevm invoke <name> [--payload J \| --payload-file F] [-l] [-v]` | call a function; `-l` prints the end of its log (last 4 KB), `-v` the log, timings and code cache hit/miss |
 | `./bin/beevm ls` / `rm <name>` | list or delete your functions |
 | `./bin/beevm prewarm <name> [-n N]` | milestone 7: start N idle VMs so the next calls are warm |
 | `./bin/beevm vms` | milestone 7: list your VMs in the warm pool and their states |
