@@ -43,6 +43,22 @@ export function PoolTable({ vms, functions, calls, client, onError }: Props) {
     }
   }
 
+  // remove deletes a function after asking; the "function" event then drops it from every open
+  // dashboard (this one included), so nothing else needs updating here.
+  const remove = async (name: string) => {
+    if (!window.confirm(`Delete the function ${name}? Its VMs and snapshot are removed too. This cannot be undone.`)) return
+    setBusy(name)
+    setMsg((m) => ({ ...m, [name]: '' }))
+    try {
+      await client.deleteFunction(name)
+    } catch (e) {
+      onError(e)
+      setMsg((m) => ({ ...m, [name]: e instanceof ApiError ? e.message : String(e) }))
+    } finally {
+      setBusy('')
+    }
+  }
+
   return (
     <section className="card panel" aria-label="Warm pools">
       <div className="panel-head">
@@ -71,7 +87,7 @@ export function PoolTable({ vms, functions, calls, client, onError }: Props) {
               <th scope="col" className="num" title="Calls seen since this page opened">
                 calls
               </th>
-              <th scope="col">prewarm</th>
+              <th scope="col">actions</th>
             </tr>
           </thead>
           <tbody>
@@ -99,6 +115,15 @@ export function PoolTable({ vms, functions, calls, client, onError }: Props) {
                       />
                       <button className="small-btn" disabled={busy === f.name} onClick={() => prewarm(f.name)}>
                         {busy === f.name ? '…' : 'Prewarm'}
+                      </button>
+                      <button
+                        className="small-btn ghost danger"
+                        disabled={busy === f.name}
+                        onClick={() => remove(f.name)}
+                        aria-label={`Delete ${f.name}`}
+                        title={`Delete ${f.name}`}
+                      >
+                        Delete
                       </button>
                     </div>
                     {msg[f.name] && <div className="muted small">{msg[f.name]}</div>}

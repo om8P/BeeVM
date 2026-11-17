@@ -91,6 +91,12 @@ export interface InvokeResult {
   roundTripMs: number // measured in the browser
 }
 
+// DeployResult is a successful deploy: the function as stored, and whether it is new.
+export interface DeployResult {
+  fn: Fn
+  created: boolean
+}
+
 export class ApiError extends Error {
   readonly status: number
   constructor(status: number, message: string) {
@@ -163,6 +169,49 @@ export class Client {
   }
   prewarm(name: string, count: number): Promise<{ requested: number; started: number }> {
     return this.json('POST', `/api/v1/functions/${encodeURIComponent(name)}/prewarm?count=${count}`)
+  }
+
+  // deploy creates or replaces a function: PUT /api/v1/functions/{name} with the code and the
+  // config as multipart parts, like `beevm deploy`. It uses XMLHttpRequest because fetch cannot
+  // report upload progress. Errors throw ApiError (status 0: the server could not be reached).
+  deploy(
+    name: string,
+    code: Uint8Array,
+    filename: string,
+    config: object,
+    onProgress?: (sent: number, total: number) => void,
+  ): Promise<DeployResult> {
+    const form = new FormData()
+    form.append('config', JSON.stringify(config))
+    form.append('code', new Blob([code as BlobPart], { type: 'application/octet-stream' }), filename)
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+      xhr.open('PUT', `${this.base}/api/v1/functions/${encodeURIComponent(name)}`)
+      for (const [k, v] of Object.entries(this.headers())) xhr.setRequestHeader(k, v)
+      if (onProgress) xhr.upload.onprogress = (e) => onProgress(e.loaded, e.lengthComputable ? e.total : code.length)
+      xhr.onload = () => {
+        if (xhr.status === 200 || xhr.status === 201) {
+          try {
+            resolve({ fn: JSON.parse(xhr.responseText) as Fn, created: xhr.status === 201 })
+          } catch {
+            reject(new ApiError(xhr.status, 'the server sent an answer that is not JSON'))
+          }
+        } else {
+          reject(new ApiError(xhr.status, errorText(xhr.status, xhr.responseText)))
+        }
+      }
+      xhr.onerror = () => reject(new ApiError(0, 'could not reach the server'))
+      xhr.send(form)
+    })
+  }
+
+  // deleteFunction removes a function, its VMs and its snapshot (204 No Content).
+  async deleteFunction(name: string): Promise<void> {
+    const r = await fetch(`${this.base}/api/v1/functions/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+      headers: this.headers(),
+    })
+    if (!r.ok) throw new ApiError(r.status, errorText(r.status, await r.text()))
   }
 
   // invoke calls a function. Function failures (502) are results, not exceptions: the timing

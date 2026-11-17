@@ -536,7 +536,8 @@ Open **http://127.0.0.1:8080/ui/** in the Windows browser and paste the API key.
 - **MicroVMs:** one tile per VM, coloured by state (blue restoring, aqua idle, orange busy, grey recycling), with its call count.
 - **Invoke:** pick a function, press Invoke, and see the start kind (warm, restore, boot), the snapshot tier, and how long each phase took.
 - **Latency: cold vs warm:** every call as a dot, with the 50 ms target line and p50/p99 per start kind.
-- **Warm pools:** idle and busy VMs per function, with a Prewarm button. Tiles at the top show the node's VMs, memory per VM and free room.
+- **Warm pools:** idle and busy VMs per function, with a Prewarm button and a Delete button. Tiles at the top show the node's VMs, memory per VM and free room.
+- **Deploy:** drop a `.py` or `.js` file, a `.zip`, a whole folder or a static Linux program (or use Choose file / Choose folder). The page detects the runtime like `beevm deploy`, checks the same rules before uploading, shows upload progress, and offers **Test it**, which selects the new function in Invoke. Try it with `examples/functions/hello-python`: deployed, then called from its function snapshot in under 100 ms.
 
 For the best effect, restart the server with a short keep-alive and run a slow load, so every call is a cold start and VMs appear and vanish on screen:
 

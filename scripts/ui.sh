@@ -49,7 +49,8 @@ case "${1:-build}" in
     install_node; deps
     log "building web/dist"
     npm_in_web run build
-    log "done: beevmd serve shows it at http://127.0.0.1:8080/ui/"
+    log "built web/dist. This only builds the page; the BeeVM server serves it:"
+    log "  start the server with ./bin/beevmd serve (or make demo), then open http://127.0.0.1:8080/ui/"
     ;;
   dev)
     install_node; deps

@@ -602,6 +602,83 @@ td.num {
   font-size: 12px;
 }
 
+/* right column: invoke above deploy */
+.stack {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  min-width: 0;
+}
+
+/* deploy */
+.drop {
+  border: 1.5px dashed var(--axis);
+  border-radius: 8px;
+  padding: 12px;
+  text-align: center;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+.drop.over {
+  border-color: var(--c-blue);
+  background: color-mix(in srgb, var(--c-blue) 8%, transparent);
+}
+.drop-text {
+  margin: 0 0 8px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+.drop-buttons {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.drop-picked {
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
+}
+.detected {
+  margin: 8px 0 0;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.warn {
+  margin: 6px 0 0;
+  color: var(--accent);
+}
+.field-help {
+  margin: 4px 0 0;
+}
+.more {
+  margin-top: 10px;
+}
+.more summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-2);
+}
+.settings {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 0 10px;
+}
+.settings label {
+  margin-top: 8px;
+}
+.deploy-btn {
+  margin-top: 12px;
+}
+.deploy .meter {
+  margin-top: 10px;
+}
+.deploy-done p {
+  margin: 0 0 6px;
+}
+button.danger {
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 45%, transparent);
+}
+
 /* key form */
 .keyform-wrap {
   min-height: 100vh;

@@ -2065,6 +2065,23 @@ Not checked: the stream with `--isolation jailer` (the hook does not depend on t
 
 All four are additive: older clients that ignore unknown events keep working (`beevm` never reads the stream). Tests: `TestEventsFunctionDeployAndDelete` (deploy, redeploy, failed deploy = no event, delete, missing delete = no event, other tenant sees nothing), `TestMe`, Vitest `applyFunctionEvent` (16 dashboard tests).
 
+### 14.10 Deploying from the dashboard (2026-11-18)
+
+A **Deploy** panel under Invoke uploads a function the same way `beevm deploy` does, and the pools table got a **Delete** button. No server change: the page uses the existing routes `PUT` and `DELETE /api/v1/functions/{name}`, with the tenant's key it already holds.
+
+| Step | What the page does |
+|---|---|
+| Pick | Drop a file or folder, or Choose file / Choose folder (`webkitdirectory`). A dropped folder is read with the browser's file-system entries; `.git` and `__pycache__` are skipped like the CLI's zipper |
+| Detect | `.py` → python (handler `<file>.handler`), `.js/.mjs/.cjs` → node, zip or folder with `handler.py` / `index.js` at the top → that runtime, a file starting with the ELF marker → binary. The runtime can be chosen by hand. **The runtime is always sent**: the server treats a missing runtime as `binary` |
+| Check | The server's rules, mirrored in `web/src/deploy.ts`: name, handler syntax, handler file present, package rules (no `..`, absolute paths, backslashes; 2,000 files, 32 MiB unpacked), 50 MiB upload, memory / vCPU / timeout ranges. For a binary: 64-bit x86-64 executable, and a warning when it is dynamically linked (a `PT_INTERP` program header, the same test as the CLI's `debug/elf` check). The server still checks everything |
+| Zip | python / node files and folders are zipped in the browser with **fflate** 0.8.2, loaded only when needed (its own 6 kB gzip file) |
+| Upload | `XMLHttpRequest` (not `fetch`: only XHR reports upload progress) with a progress bar; a replace and a delete ask first |
+| After | "Created hello-py (python handler.handler): 482 B, …", the note that the function snapshot is being built, and **Test it** (selects the function in Invoke and focuses the button). The function list updates through the existing `function` event, in every open dashboard |
+
+**Why the checks are duplicated in the browser:** the server is the authority (a page can always be bypassed), but checking first turns "400 bad config" after an upload into a sentence next to the field before anything is sent.
+
+Tests: Vitest `deploy.test.ts`, 20 tests (names, handlers, detection, hand-built Linux program headers: static, dynamic, ARM64, 32-bit, object file; package rules; real zips built and read back; `prepare` for a file, a folder, a zip and a binary); 36 dashboard tests in all. Checked by hand in the browser against a real server: a Python file, a Node.js zip, the 2.5 MB Go example and a folder with a sub-package, each called from its function snapshot (VM ready 44-84 ms); a text file, a bad name, 32 MiB memory and a missing handler file all blocked with a message; replace and delete with their confirmations; no sideways scrolling at 375 px (dark) and 1024 px (light).
+
 ---
 
 ## Appendix A: command cheat sheet

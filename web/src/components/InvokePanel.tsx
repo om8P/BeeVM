@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ApiError, type Client, type Fn, type InvokeResult } from '../api'
 import { fmtMs } from '../stats'
 
@@ -6,19 +6,38 @@ interface Props {
   client: Client
   functions: Fn[]
   onError: (e: unknown) => void
+  // pick (optional) selects a function from outside, e.g. "Test it" after a deploy; seq makes
+  // picking the same name twice count again.
+  pick?: { name: string; seq: number }
 }
 
 // InvokePanel: call a function and see where the time went.
-export function InvokePanel({ client, functions, onError }: Props) {
+export function InvokePanel({ client, functions, onError, pick }: Props) {
   const [name, setName] = useState('')
   const [payload, setPayload] = useState('{"name":"BeeVM"}')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<InvokeResult | null>(null)
   const [err, setErr] = useState('')
+  const panel = useRef<HTMLElement>(null)
+  const button = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     if (!functions.some((f) => f.name === name)) setName(functions[0]?.name ?? '')
   }, [functions, name])
+
+  // Picked from outside: select it (once the function list has it), bring the panel into view
+  // and put the focus on Invoke.
+  const pickSeq = pick?.seq
+  const pickName = pick?.name
+  const known = !!pickName && functions.some((f) => f.name === pickName)
+  useEffect(() => {
+    if (!pickName || !known) return
+    setName(pickName)
+    setResult(null)
+    setErr('')
+    panel.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    button.current?.focus({ preventScroll: true })
+  }, [pickSeq, pickName, known])
 
   const invoke = async () => {
     setBusy(true)
@@ -60,13 +79,13 @@ export function InvokePanel({ client, functions, onError }: Props) {
     : []
 
   return (
-    <section className="card panel invoke" aria-label="Invoke">
+    <section ref={panel} className="card panel invoke" aria-label="Invoke">
       <div className="panel-head">
         <h2>Invoke</h2>
       </div>
       {functions.length === 0 ? (
         <p className="muted empty">
-          No functions yet. Deploy one: <code>beevm deploy hello bin/functions/hello-go-binary</code>
+          No functions yet. Deploy one with the Deploy panel, or <code>beevm deploy hello bin/functions/hello-go-binary</code>
         </p>
       ) : (
         <>
@@ -80,7 +99,7 @@ export function InvokePanel({ client, functions, onError }: Props) {
           </select>
           <label htmlFor="payload">Payload (JSON)</label>
           <textarea id="payload" rows={3} spellCheck={false} value={payload} onChange={(e) => setPayload(e.target.value)} />
-          <button onClick={invoke} disabled={busy || !name}>
+          <button ref={button} onClick={invoke} disabled={busy || !name}>
             {busy ? 'Calling…' : 'Invoke'}
           </button>
         </>

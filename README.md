@@ -252,7 +252,7 @@ without touching the core.
 |---|---|
 | **Tenant isolation** | `sudo ./bin/beevmd serve --isolation jailer` puts every VM in a jailer chroot under its own user, with cgroup limits and its own network namespace. `make test-isolation` runs six attacks against it. |
 | **Code in a bucket** | `make minio` runs a local S3 server; then `set -a; . deploy/minio.env; set +a` before `beevmd serve`. Without a bucket, code stays on local disk. |
-| **Web dashboard** | `make ui`, then open http://127.0.0.1:8080/ui/ and paste your API key. |
+| **Web dashboard** | `make ui`, then open http://127.0.0.1:8080/ui/ and paste your API key. Besides the live view you can deploy functions there (drop a file, a zip, a folder or a binary), call them, prewarm and delete them. |
 | **Prometheus and Grafana** | `make monitoring`, then open http://localhost:3000 (dashboard "BeeVM"). |
 
 ## Tests

@@ -16,6 +16,7 @@ import { KeyForm } from './components/KeyForm'
 import { Density } from './components/Density'
 import { VmGrid } from './components/VmGrid'
 import { InvokePanel } from './components/InvokePanel'
+import { DeployPanel } from './components/DeployPanel'
 import { PoolTable } from './components/PoolTable'
 
 // The chart library (Recharts) is most of the JavaScript. Loading the chart lazily puts it in a
@@ -55,6 +56,9 @@ function Dashboard({ apiKey, onSignOut }: { apiKey: string; onSignOut: (reason?:
   const [node, setNode] = useState<NodeInfo | null>(null)
   const [tenant, setTenant] = useState('')
   const [now, setNow] = useState(Date.now())
+  // "Test it" after a deploy: which function the Invoke panel should select.
+  const [pick, setPick] = useState<{ name: string; seq: number } | undefined>()
+  const testFunction = useCallback((name: string) => setPick((p) => ({ name, seq: (p?.seq ?? 0) + 1 })), [])
 
   // Any 401 means the key is wrong or was revoked: back to the key form.
   const onError = useCallback(
@@ -150,7 +154,10 @@ function Dashboard({ apiKey, onSignOut }: { apiKey: string; onSignOut: (reason?:
 
       <div className="row row-main">
         <VmGrid vms={vms} functions={functions} node={node} maxVMs={live.maxVMs} pulse={pulse} now={now} />
-        <InvokePanel client={client} functions={functions} onError={onError} />
+        <div className="stack">
+          <InvokePanel client={client} functions={functions} onError={onError} pick={pick} />
+          <DeployPanel client={client} functions={functions} onError={onError} onTest={testFunction} />
+        </div>
       </div>
 
       <div className="row row-main row-bottom">
@@ -169,7 +176,7 @@ function Dashboard({ apiKey, onSignOut }: { apiKey: string; onSignOut: (reason?:
 
       <footer className="muted foot">
         Uses only the public API: <code>/api/v1/events</code> (live), <code>/api/v1/vms</code>,{' '}
-        <code>/api/v1/node</code>, <code>/api/v1/functions</code>, <code>/invoke</code>. Shows your tenant's VMs; the
+        <code>/api/v1/node</code>, <code>/api/v1/functions</code> (list, deploy, delete), <code>/invoke</code>. Shows your tenant's VMs; the
         node counters include every tenant.
       </footer>
     </div>
