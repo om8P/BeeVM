@@ -1,0 +1,9 @@
+2026-11-17 09:31:27 $ make test-bench
+/usr/bin/python3 bench/test_plot_results.py
+.........
+----------------------------------------------------------------------
+Ran 9 tests in 0.014s
+
+OK
+k6 inspect warm ok
+k6 inspect mixed ok

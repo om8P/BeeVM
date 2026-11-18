@@ -2,8 +2,9 @@
 BEEVM_HOME ?= $(HOME)/.beevm
 export BEEVM_HOME
 GO ?= /usr/local/go/bin/go
+PYTHON ?= /usr/bin/python3
 
-.PHONY: help demo doctor setup images kernel rootfs rootfs-python rootfs-node boot boot-test clean-images build examples test test-kvm test-isolation test-s3 vet minio minio-up minio-down monitoring monitoring-up monitoring-down ui ui-dev test-ui
+.PHONY: help bench bench-setup bench-jailer bench-report test-bench demo doctor setup images kernel rootfs rootfs-python rootfs-node boot boot-test clean-images build examples test test-kvm test-isolation test-s3 vet minio minio-up minio-down monitoring monitoring-up monitoring-down ui ui-dev test-ui
 
 help:
 	@echo "make demo         build, check, start the server with three ready functions (Ctrl-C stops)"
@@ -22,6 +23,8 @@ help:
 	@echo "make minio-up     same, with Docker Compose (minio-down stops it)"
 	@echo "make monitoring   (optional) run Prometheus :9090 + Grafana :3000 for beevmd, no Docker"
 	@echo "make ui           (optional) build the web dashboard (web/dist, served at /ui/); ui-dev, test-ui"
+	@echo "make bench        benchmarks: cold start, k6 throughput, density, charts + report (BENCH_QUICK=1 = short)"
+	@echo "make bench-setup  install k6 + matplotlib for make bench (sudo, once); bench-jailer, bench-report, test-bench"
 	@echo "make vet          go vet"
 	@echo "make clean-images delete images and run folders in $(BEEVM_HOME)"
 
@@ -117,3 +120,25 @@ ui-dev:
 
 test-ui:
 	bash scripts/ui.sh test
+
+# M12: benchmarks. `make bench-setup` installs k6 and matplotlib (sudo, once). `make bench` runs
+# cold start, k6 throughput and two density scenarios and writes charts + report.md into
+# bench/results/m12/<time>/ (BENCH_QUICK=1 for a 5-minute smoke run). `make bench-jailer` adds
+# the density run with isolation (sudo). `make bench-report DIR=<folder>` re-plots a folder.
+bench-setup:
+	bash scripts/bench-setup.sh
+
+bench:
+	bash scripts/bench.sh
+
+bench-jailer:
+	bash scripts/bench-jailer.sh
+
+bench-report:
+	@test -n "$(DIR)" || { echo "usage: make bench-report DIR=bench/results/m12/<folder>"; exit 1; }
+	bash scripts/bench-collect.sh $(DIR)
+	$(PYTHON) bench/plot_results.py $(DIR)
+
+test-bench:
+	$(PYTHON) bench/test_plot_results.py
+	@if command -v k6 >/dev/null 2>&1; then for f in warm mixed; do k6 inspect bench/k6/$$f.js >/dev/null && echo "k6 inspect $$f ok"; done; else echo "k6 not installed: skipped k6 inspect (make bench-setup)"; fi

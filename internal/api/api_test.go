@@ -86,6 +86,7 @@ func newEnvDeps(t *testing.T, run runner.Runner, fr *fakeRunner, change func(*De
 		change(&deps)
 	}
 	srv := New(deps)
+	t.Cleanup(srv.Close) // runs after ts.Close (cleanups run last-in first-out)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return &env{t: t, ts: ts, reg: reg, code: code, runner: fr, codeDir: codeDir}

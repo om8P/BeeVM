@@ -189,3 +189,14 @@ func TestInvokeWithLogs(t *testing.T) {
 		t.Errorf("long log: %d of %d bytes, %v", len(res.Log), res.LogBytes, err)
 	}
 }
+
+func TestNodeWithoutPoolIsEmpty(t *testing.T) {
+	c, _, _ := setup(t)
+	n, err := c.Node(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n.MaxVMs != 0 || n.VMs != 0 {
+		t.Errorf("node without a pool = %+v, want no VMs", n)
+	}
+}

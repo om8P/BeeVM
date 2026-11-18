@@ -48,6 +48,8 @@ type doctorEnv struct {
 	// snapshots lists the snapshots on disk; nil = skip the check.
 	snapshots func() ([]snapInfo, error)
 	tenants   func() (int, error)
+	// benchTools says whether k6 and python3-matplotlib are installed (make bench); nil = skip.
+	benchTools func() (k6, matplotlib bool)
 }
 
 type snapInfo struct {
@@ -83,6 +85,7 @@ func runDoctor(args []string) int {
 			}
 			return out, nil
 		},
+		benchTools: benchToolsInstalled,
 		tenants: func() (int, error) {
 			reg, err := openRegistry(home)
 			if err != nil {
@@ -149,6 +152,9 @@ func doctorChecks(e doctorEnv) []check {
 		}
 	}
 	add(checkUI(e.uiDir))
+	if e.benchTools != nil {
+		add(checkBenchTools(e.benchTools()))
+	}
 	if c, ok := checkPower(e.power); ok {
 		add(c)
 	}
@@ -376,4 +382,25 @@ func printChecks(w io.Writer, checks []check) {
 	default:
 		fmt.Fprintln(w, "\nready")
 	}
+}
+
+// checkBenchTools reports the tools `make bench` needs besides the Go binaries.
+func checkBenchTools(k6, matplotlib bool) check {
+	switch {
+	case k6 && matplotlib:
+		return check{levelOK, "bench tools", "k6 and matplotlib installed", ""}
+	case !k6 && !matplotlib:
+		return check{levelInfo, "bench tools", "k6 and python3-matplotlib missing (only needed for make bench)", "make bench-setup"}
+	case !k6:
+		return check{levelInfo, "bench tools", "k6 missing (only needed for make bench)", "make bench-setup"}
+	}
+	return check{levelInfo, "bench tools", "python3-matplotlib missing (only needed for make bench)", "make bench-setup"}
+}
+
+// benchToolsInstalled looks for k6 on PATH and tries to import matplotlib.
+func benchToolsInstalled() (k6, matplotlib bool) {
+	_, err := exec.LookPath("k6")
+	k6 = err == nil
+	matplotlib = exec.Command(envOr("BEEVM_PYTHON", "/usr/bin/python3"), "-c", "import matplotlib").Run() == nil
+	return
 }

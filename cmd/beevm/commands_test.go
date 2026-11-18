@@ -95,6 +95,8 @@ func TestReadPayloadSources(t *testing.T) {
 
 func TestMissingKeyIsExitCode2(t *testing.T) {
 	t.Setenv("BEEVM_API_KEY", "")
+	// No saved login either (a real `beevm login` on this machine must not satisfy the test).
+	t.Setenv("BEEVM_CONFIG", filepath.Join(t.TempDir(), "none.json"))
 	s := &settings{}
 	_, err := s.client()
 	ee, ok := err.(*exitError)

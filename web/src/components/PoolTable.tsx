@@ -59,10 +59,56 @@ export function PoolTable({ vms, functions, calls, client, onError }: Props) {
     }
   }
 
+  // cool throws away warm VMs (one function, or all with name ''), so the next call is a cold
+  // start again; the VM tiles and counts update through the event stream.
+  const [coolMsg, setCoolMsg] = useState('')
+  const warmVMs = vms.filter((v) => v.state !== 'destroyed').length
+  const cool = async (name: string) => {
+    setBusy(name || '*')
+    setCoolMsg('')
+    if (name) setMsg((m) => ({ ...m, [name]: '' }))
+    // How many VMs the function has right now, to say honestly whether the next call is cold.
+    const p = byName.get(name)
+    const had = name ? (p?.idle ?? 0) + (p?.busy ?? 0) + (p?.restoring ?? 0) : warmVMs
+    try {
+      // One function: as many as the row's number says (the same box as Prewarm).
+      const n = await client.cool(name || undefined, name ? (count[name] ?? 1) : undefined)
+      const left = had - n
+      const text =
+        n === 0
+          ? 'no warm VMs: next call is cold'
+          : left > 0
+            ? `cooled ${n} VM${n === 1 ? '' : 's'}, ${left} still warm`
+            : `cooled ${n} VM${n === 1 ? '' : 's'}: next call is cold`
+      if (name) setMsg((m) => ({ ...m, [name]: text }))
+      else setCoolMsg(text)
+    } catch (e) {
+      onError(e)
+      const text = e instanceof ApiError && e.status === 501 ? 'no warm pool on this server' : e instanceof ApiError ? e.message : String(e)
+      if (name) setMsg((m) => ({ ...m, [name]: text }))
+      else setCoolMsg(text)
+    } finally {
+      setBusy('')
+    }
+  }
+
   return (
     <section className="card panel" aria-label="Warm pools">
       <div className="panel-head">
         <h2>Warm pools</h2>
+        {functions.length > 0 && (
+          <span className="cool-all">
+            {coolMsg && <span className="muted small">{coolMsg}</span>}
+            <button
+              className="small-btn ghost"
+              disabled={busy === '*' || warmVMs === 0}
+              title="Throw away all your warm VMs, so every function's next call is a cold start"
+              onClick={() => cool('')}
+            >
+              {busy === '*' ? '…' : 'Cool all'}
+            </button>
+          </span>
+        )}
       </div>
       {functions.length === 0 ? (
         <p className="muted empty">No functions deployed.</p>
@@ -109,12 +155,22 @@ export function PoolTable({ vms, functions, calls, client, onError }: Props) {
                         type="number"
                         min={1}
                         max={64}
-                        aria-label={`VMs to prewarm for ${f.name}`}
+                        aria-label={`VMs to prewarm or cool for ${f.name}`}
+                        title="How many VMs Prewarm starts and Cool throws away"
                         value={count[f.name] ?? 1}
                         onChange={(e) => setCount((c) => ({ ...c, [f.name]: Math.max(1, Number(e.target.value) || 1) }))}
                       />
                       <button className="small-btn" disabled={busy === f.name} onClick={() => prewarm(f.name)}>
                         {busy === f.name ? '…' : 'Prewarm'}
+                      </button>
+                      <button
+                        className="small-btn ghost"
+                        disabled={busy === f.name || ((p?.idle ?? 0) + (p?.busy ?? 0) + (p?.restoring ?? 0)) === 0}
+                        onClick={() => cool(f.name)}
+                        aria-label={`Cool ${f.name}`}
+                        title={`Throw away ${count[f.name] ?? 1} of ${f.name}'s warm VMs (idle first), so the next call is a cold start`}
+                      >
+                        Cool
                       </button>
                       <button
                         className="small-btn ghost danger"

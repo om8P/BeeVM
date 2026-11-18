@@ -145,3 +145,77 @@ func TestListVMsIsPerTenant(t *testing.T) {
 	}
 	status(t, e.do("GET", "/api/v1/vms", "", nil, ""), 401)
 }
+
+// coolRunner is a fakeRunner with a warm pool that can be cooled.
+type coolRunner struct {
+	*fakeRunner
+	mu     sync.Mutex
+	cooled []int64
+	maxes  []int
+}
+
+func (c *coolRunner) Cool(functionID int64, max int) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cooled = append(c.cooled, functionID)
+	c.maxes = append(c.maxes, max)
+	if max > 0 {
+		return max
+	}
+	return 2
+}
+
+func TestCoolRoutes(t *testing.T) {
+	fr := &fakeRunner{result: runner.Result{Output: json.RawMessage(`{}`)}}
+	cr := &coolRunner{fakeRunner: fr}
+	e := newEnvWith(t, cr, fr)
+	alice, bob := e.tenant("alice"), e.tenant("bob")
+	e.deploy(alice, "a1", elf("1"), "").Body.Close()
+	e.deploy(alice, "a2", elf("2"), "").Body.Close()
+	e.deploy(bob, "b1", elf("3"), "").Body.Close()
+
+	if r := decode[apitypes.CoolResult](t, e.do("POST", "/api/v1/functions/a1/cool", alice, nil, "")); r.Cooled != 2 {
+		t.Errorf("cool a1: %+v", r)
+	}
+	status(t, e.do("POST", "/api/v1/functions/b1/cool", alice, nil, ""), 404) // bob's function
+	status(t, e.do("POST", "/api/v1/functions/nope/cool", alice, nil, ""), 404)
+	if r := decode[apitypes.CoolResult](t, e.do("POST", "/api/v1/vms/cool", alice, nil, "")); r.Cooled != 4 {
+		t.Errorf("cool all: %+v (want 2 functions x 2)", r)
+	}
+	status(t, e.do("POST", "/api/v1/vms/cool", "", nil, ""), 401)
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	if len(cr.cooled) != 3 {
+		t.Errorf("cooled function IDs %v: want a1, then a1 and a2 (never bob's)", cr.cooled)
+	}
+	if cr.maxes[0] != 0 || cr.maxes[1] != 0 {
+		t.Errorf("without a count everything is cooled: %v", cr.maxes)
+	}
+}
+
+func TestCoolCount(t *testing.T) {
+	fr := &fakeRunner{result: runner.Result{Output: json.RawMessage(`{}`)}}
+	cr := &coolRunner{fakeRunner: fr}
+	e := newEnvWith(t, cr, fr)
+	key := e.tenant("alice")
+	e.deploy(key, "f", elf("1"), "").Body.Close()
+	if r := decode[apitypes.CoolResult](t, e.do("POST", "/api/v1/functions/f/cool?count=3", key, nil, "")); r.Cooled != 3 {
+		t.Errorf("count 3: %+v", r)
+	}
+	for _, bad := range []string{"0", "-1", "x", "100000"} {
+		status(t, e.do("POST", "/api/v1/functions/f/cool?count="+bad, key, nil, ""), 400)
+	}
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	if len(cr.maxes) != 1 || cr.maxes[0] != 3 {
+		t.Errorf("the runner got %v; bad counts must not reach it", cr.maxes)
+	}
+}
+
+func TestCoolWithoutWarmPool(t *testing.T) {
+	e := newEnv(t) // plain fakeRunner: no warm pool
+	key := e.tenant("alice")
+	e.deploy(key, "f", elf("x"), "").Body.Close()
+	status(t, e.do("POST", "/api/v1/functions/f/cool", key, nil, ""), 501)
+	status(t, e.do("POST", "/api/v1/vms/cool", key, nil, ""), 501)
+}

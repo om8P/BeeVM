@@ -1,0 +1,17 @@
+2026-11-17 09:32:33 $ bash -c go test -count=1 -v ./... 2>&1 | grep -c "^--- PASS" | xargs echo "unit tests passed:"; go test -count=1 -v ./... 2>&1 | grep -c "^--- FAIL" | xargs echo "unit tests failed:"
+unit tests passed: 305
+unit tests failed: 0
+
+2026-11-17 09:31:27 $ make test-bench
+/usr/bin/python3 bench/test_plot_results.py
+.........
+----------------------------------------------------------------------
+Ran 9 tests in 0.014s
+
+OK
+k6 inspect warm ok
+k6 inspect mixed ok
+
+2026-11-17 09:31:27 $ bash -c grep -rhoE "^func (Test[A-Za-z0-9_]+)" --include="*_kvm_test.go" internal | wc -l | xargs echo "KVM integration test functions:"; grep -rlE "//go:build kvm" internal | wc -l | xargs echo "files tagged //go:build kvm:"
+KVM integration test functions: 34
+files tagged //go:build kvm: 13

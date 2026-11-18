@@ -36,10 +36,12 @@ func testServer(t *testing.T) (url, key string) {
 	}
 	t.Cleanup(func() { reg.Close() })
 	code, _ := codestore.New(t.TempDir())
-	ts := httptest.NewServer(api.New(api.Deps{
+	srv := api.New(api.Deps{
 		Registry: reg, Code: code, Runner: noRunner{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		MaxUploadBytes: 1 << 20, MaxPayloadBytes: 1 << 10,
-	}).Handler())
+	})
+	t.Cleanup(srv.Close) // stops the async workers, after ts.Close
+	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	tn, _ := reg.CreateTenant("alice")
 	key, _, _ = reg.CreateKey(tn.ID)

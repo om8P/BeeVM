@@ -1,0 +1,13 @@
+2026-11-17 09:24:28 $ bash -c curl -s 127.0.0.1:8080/metrics | grep -E "^beevm_(invocations_total|vms\{|vm_memory_pss_bytes)" | head -20
+beevm_invocations_total{function="hello",runtime="binary",start="restore",status="ok",tenant="demo"} 1
+beevm_invocations_total{function="hello-node",runtime="node",start="restore",status="ok",tenant="demo"} 1
+beevm_invocations_total{function="hello-python",runtime="python",start="restore",status="ok",tenant="demo"} 1
+beevm_invocations_total{function="hello-python",runtime="python",start="warm",status="ok",tenant="demo"} 1
+beevm_vm_memory_pss_bytes{state="busy"} 0
+beevm_vm_memory_pss_bytes{state="idle"} 1.13314816e+08
+beevm_vm_memory_pss_bytes{state="recycling"} 0
+beevm_vm_memory_pss_bytes{state="restoring"} 0
+beevm_vms{state="busy"} 0
+beevm_vms{state="idle"} 6
+beevm_vms{state="recycling"} 0
+beevm_vms{state="restoring"} 0

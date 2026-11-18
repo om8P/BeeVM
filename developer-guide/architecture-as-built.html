@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BeeVM Architecture (as built)</title>
+<!-- Source for "BeeVM system architecture (as built)@2x.png".
+     Render: cd developer-guide/tools && node render-arch.js
+     Layout is absolute (1600 x 1580 CSS px); arrows are one SVG overlay using the same coordinates. -->
+<style>
+  :root {
+    --bg: #f3f4f6; --ink: #111418; --ink2: #4a5260; --ink3: #8a919c;
+    --panel-line: #e1e4e8;
+    --core-fill: #fff6df; --core-line: #e7b53c;
+    --ext-line: #59616d; --opt: #2f63d6; --plan: #9aa1ab;
+    --new: #138a5b; --new-bg: #e3f5ec; --chg: #7a4fd0; --chg-bg: #efe8fb;
+    --mono: "Cascadia Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); font-family: "Segoe UI", system-ui, sans-serif; color: var(--ink); }
+  #canvas { position: relative; width: 1600px; height: 1540px; background: var(--bg); }
+  .abs { position: absolute; }
+  h1 { font-size: 40px; font-weight: 700; letter-spacing: -0.5px; }
+  .subtitle { font-size: 17px; color: var(--ink2); }
+  .panel { position: absolute; border-radius: 14px; border: 1px solid var(--panel-line); background: rgba(255,255,255,.55); }
+  .panel.core { background: var(--core-fill); border-color: var(--core-line); }
+  .panel.guest { background: #e9ecf1; border-color: #d6dae1; }
+  .plabel { position: absolute; left: 20px; top: 12px; font-size: 13px; font-weight: 600; letter-spacing: 1.6px; color: var(--ink2); text-transform: uppercase; }
+  .panel.core .plabel { color: #8a6410; }
+  .card { position: absolute; background: #fff; border: 1.6px solid var(--ext-line); border-radius: 10px;
+          padding: 12px 12px 10px; text-align: center; display: flex; flex-direction: column; justify-content: center; gap: 3px; }
+  .card.core { border-color: var(--core-line); }
+  .card.opt { border: 1.8px dashed var(--opt); }
+  .card.plan { border: 1.8px dashed var(--plan); background: #f7f8f9; }
+  .card.plan .t, .card.plan .s { color: var(--ink3); }
+  .t { font-size: 16.5px; font-weight: 700; line-height: 1.2; }
+  .s { font-size: 13px; color: var(--ink2); line-height: 1.38; }
+  .m { font-family: var(--mono); font-size: 12.5px; color: var(--ink2); line-height: 1.5; }
+  .tags { display: flex; justify-content: center; gap: 5px; margin-bottom: 3px; }
+  .tag { font-size: 10.5px; font-weight: 700; letter-spacing: .8px; padding: 2px 7px; border-radius: 99px; }
+  .tag.new { color: var(--new); background: var(--new-bg); }
+  .tag.chg { color: var(--chg); background: var(--chg-bg); }
+  .tag.plan { color: #6b727c; background: #e7e9ec; }
+  .tag.go { color: #00799e; background: #def4fa; }
+  .alabel { position: absolute; font-size: 13px; color: var(--ink2); white-space: nowrap; }
+  .alabel.opt { color: var(--opt); }
+  .alabel.plan { color: var(--ink3); }
+  .lg { position: absolute; left: 1180px; font-size: 14px; color: var(--ink2); display: flex; align-items: center; gap: 10px; }
+  .sw { width: 28px; height: 17px; border-radius: 4px; background: #fff; }
+  .kv { display: grid; grid-template-columns: 1fr auto; row-gap: 7px; column-gap: 10px; font-size: 13.5px; }
+  .kv b { font-weight: 600; color: var(--ink); text-align: right; font-variant-numeric: tabular-nums; }
+  .kv span { color: var(--ink2); }
+  .changes { display: grid; grid-template-columns: 1fr 1fr; column-gap: 40px; row-gap: 8px; font-size: 13.5px; color: var(--ink2); line-height: 1.4; }
+  .changes div::before { content: "→ "; color: var(--chg); font-weight: 700; }
+  .changes b { color: var(--ink); font-weight: 600; }
+</style>
+</head>
+<body>
+<div id="canvas">
+
+  <!-- ===== Header ===== -->
+  <svg class="abs" style="left:50px;top:42px" width="48" height="52" viewBox="0 0 48 52">
+    <path d="M24 2 L45 14 L45 38 L24 50 L3 38 L3 14 Z" fill="#f2b632" stroke="#1d1d1f" stroke-width="2.5"/>
+    <rect x="12" y="20" width="24" height="5" rx="2.5" fill="#1d1d1f"/>
+    <rect x="12" y="30" width="24" height="5" rx="2.5" fill="#1d1d1f"/>
+  </svg>
+  <h1 class="abs" style="left:112px;top:38px">BeeVM architecture <span style="color:var(--ink3);font-weight:600">· as built</span></h1>
+  <div class="abs subtitle" style="left:50px;top:110px">Firecracker MicroVM FaaS runtime with warm pool + two-tier snapshots · Case Study 06 · state of 18 Nov 2026 (milestones 1–12)</div>
+
+  <div class="lg" style="top:30px;font-size:13px;font-weight:600;letter-spacing:1.6px">LEGEND</div>
+  <div class="lg" style="top:56px"><div class="sw" style="border:1.6px solid var(--core-line)"></div>BeeVM component (Go)</div>
+  <div class="lg" style="top:82px"><div class="sw" style="border:1.6px solid var(--ext-line)"></div>Client · host · storage · guest</div>
+  <div class="lg" style="top:108px"><div class="sw" style="border:1.8px dashed var(--opt)"></div>Optional module (swappable)</div>
+  <div class="lg" style="top:134px"><div class="sw" style="border:1.8px dashed var(--plan);background:#f7f8f9"></div>Planned, not built yet</div>
+  <div class="lg" style="top:56px;left:1420px"><span class="tag new">NEW</span>not in old plan</div>
+  <div class="lg" style="top:82px;left:1420px"><span class="tag chg">CHANGED</span>differs</div>
+
+  <!-- ===== Clients panel ===== -->
+  <div class="panel" style="left:50px;top:170px;width:1080px;height:190px"><div class="plabel">Clients &amp; dashboards</div></div>
+
+  <div class="card" style="left:80px;top:205px;width:192px;height:130px">
+    <div class="tags"><span class="tag new">NEW</span></div>
+    <div class="t">beevmd (operator)</div>
+    <div class="s">Go · flag<br>serve · tenant · key<br>snapshot · bench · doctor<br><i>local: SQLite + files</i></div>
+  </div>
+  <div class="card" style="left:287px;top:205px;width:192px;height:130px">
+    <div class="tags"><span class="tag chg">CHANGED</span></div>
+    <div class="t">beevm CLI</div>
+    <div class="s">Go · Cobra<br>login · deploy · invoke -l/-v<br>prewarm · vms · init</div>
+  </div>
+  <div class="card" style="left:494px;top:205px;width:192px;height:130px">
+    <div class="t">HTTP clients</div>
+    <div class="s">curl · k6 · bench load<br>Bearer tenant API key</div>
+  </div>
+  <div class="card opt" style="left:701px;top:205px;width:192px;height:130px">
+    <div class="tags"><span class="tag chg">CHANGED</span></div>
+    <div class="t">Web Dashboard</div>
+    <div class="s">React 19 · Vite · Recharts<br>VM grid · invoke · deploy<br>served by beevmd at /ui/</div>
+  </div>
+  <div class="card opt" style="left:908px;top:205px;width:192px;height:130px">
+    <div class="tags"><span class="tag chg">CHANGED</span></div>
+    <div class="t" style="font-size:15px">Prometheus + Grafana</div>
+    <div class="s">pinned binaries, no Docker<br>scrape every 1 s<br>Grafana :3000 "BeeVM"</div>
+  </div>
+
+  <!-- ===== Planned bare-metal (top right) ===== -->
+  <div class="card plan" style="left:1180px;top:205px;width:370px;height:130px">
+    <div class="tags"><span class="tag plan">PLANNED · M13 NOT STARTED</span></div>
+    <div class="t">Bare-metal cloud node</div>
+    <div class="s">i3en.metal / c5.metal or nested-virt VM · Terraform<br>no nested virtualization · userfaultfd page prefetch</div>
+  </div>
+
+  <!-- ===== beevmd panel ===== -->
+  <div class="panel core" style="left:50px;top:400px;width:1080px;height:590px"><div class="plabel" style="top:auto;bottom:9px">beevmd · Go daemon, one per node · runs in WSL2 today</div></div>
+
+  <div class="card core" style="left:80px;top:440px;width:1020px;height:92px">
+    <div class="t">API Gateway &amp; HTTP Router <span class="tag go" style="vertical-align:middle">GO · CHI</span></div>
+    <div class="m">POST /invoke/{fn} · /api/v1/{functions,vms,node,me} · /api/v1/events (SSE) · /metrics · /ui/ · /healthz</div>
+    <div class="s">tenant API key (Bearer) · timing headers X-BeeVM-Start / -Snapshot / -*-Ms · request id + one log line per call</div>
+  </div>
+
+  <!-- row B -->
+  <div class="card core" style="left:80px;top:590px;width:225px;height:160px">
+    <div class="t">Function Registry</div>
+    <div class="s">SQLite (modernc, pure Go)<br>tenants · keys (SHA-256)<br>runtime · handler · memory<br>vCPU · timeout · code sha256</div>
+  </div>
+  <div class="card core" style="left:345px;top:590px;width:225px;height:160px">
+    <div class="tags"><span class="tag new">NEW</span></div>
+    <div class="t">Events Hub</div>
+    <div class="s">internal/events<br>vm · invoke · function events<br>Publish never blocks<br>feeds the SSE stream</div>
+  </div>
+  <div class="card core" style="left:610px;top:590px;width:225px;height:160px">
+    <div class="tags"><span class="tag chg">CHANGED</span></div>
+    <div class="t">Scheduler &amp; Warm Pool</div>
+    <div class="s" style="font-size:12.5px">warm (default) · snapshot · cold<br>idle VMs per function, 60 s TTL<br>LRU · max VMs · tenant quota<br>Restoring→Idle→Busy→Recycle</div>
+  </div>
+  <div class="card core" style="left:875px;top:590px;width:225px;height:160px">
+    <div class="tags"><span class="tag chg">CHANGED</span></div>
+    <div class="t">Snapshot Manager</div>
+    <div class="s">runtime snapshots (bin · py · node)<br>function snapshots fn-&lt;key&gt;,<br>built in background after deploy<br>lazy mmap restore → /resume</div>
+  </div>
+
+  <!-- row C -->
+  <div class="card core" style="left:80px;top:800px;width:225px;height:160px">
+    <div class="t">Observability</div>
+    <div class="s">prometheus/client_golang<br>latency per start kind<br>VMs per state · PSS / RSS per VM<br>slog JSON / text logs</div>
+  </div>
+  <div class="card core" style="left:345px;top:800px;width:225px;height:160px">
+    <div class="tags"><span class="tag chg">CHANGED</span></div>
+    <div class="t">Isolation &amp; Network</div>
+    <div class="s">--isolation none (default) | jailer<br>jailer chroot + UID · seccomp<br>cgroups v2: memory · pids · cpu<br>netns per VM · TAP · nftables</div>
+  </div>
+  <div class="card core" style="left:610px;top:800px;width:225px;height:160px">
+    <div class="t">VM Manager</div>
+    <div class="s">firecracker-go-sdk<br>boot · restore · stop · kill<br>shared read-only rootfs<br>vsock socket per VM</div>
+  </div>
+  <div class="card core" style="left:875px;top:800px;width:225px;height:160px">
+    <div class="tags"><span class="tag new">NEW</span></div>
+    <div class="t">Code Store</div>
+    <div class="s">functions/&lt;sha256&gt; on local disk<br>cache in front of S3 (hit/miss)<br>written on deploy<br>zip rules: internal/pkg</div>
+  </div>
+
+  <!-- ===== Host & storage (right) ===== -->
+  <div class="panel" style="left:1180px;top:400px;width:370px;height:590px;background:#e9ecf1;border-color:#d6dae1"><div class="plabel">Host node &amp; storage</div></div>
+
+  <div class="card" style="left:1200px;top:440px;width:330px;height:110px">
+    <div class="tags"><span class="tag chg">CHANGED</span></div>
+    <div class="t">Dev node (runs here today)</div>
+    <div class="s">Windows 11 → WSL2 Ubuntu 24.04<br>/dev/kvm via nested KVM · Firecracker + jailer</div>
+  </div>
+  <div class="card" style="left:1200px;top:590px;width:330px;height:160px">
+    <div class="t">Local disk · $BEEVM_HOME</div>
+    <div class="m" style="font-size:12px">beevm.db · functions/&lt;sha256&gt;<br>snapshots/&lt;key&gt;/ vmstate + mem<br>snapshots/fn-&lt;key&gt;/<br>vmlinux 6.1 · 3 rootfs images</div>
+  </div>
+  <div class="card opt" style="left:1200px;top:800px;width:330px;height:160px">
+    <div class="tags"><span class="tag chg">CHANGED</span></div>
+    <div class="t">Artifact Store (S3 API)</div>
+    <div class="s">MinIO built from pinned source (no Docker)<br>AWS S3 through the same aws-sdk-go-v2 client<br>function code only · no snapshot backup<br>no bucket → local disk only</div>
+  </div>
+
+  <!-- ===== MicroVMs ===== -->
+  <div class="panel guest" style="left:50px;top:1060px;width:1080px;height:215px"><div class="plabel" style="top:auto;bottom:11px">Firecracker MicroVMs × N · KVM isolated · vmlinux 6.1 · Alpine 3.24 shared read-only rootfs</div></div>
+
+  <div class="card" style="left:80px;top:1080px;width:320px;height:150px">
+    <div class="tags"><span class="tag chg">CHANGED</span></div>
+    <div class="t">MicroVM · Python 3.14</div>
+    <div class="s">beevm-agent on vsock<br>long-lived shim.py → handler(event)<br>zip package in /run/beevm/code</div>
+  </div>
+  <div class="card" style="left:430px;top:1080px;width:320px;height:150px">
+    <div class="tags"><span class="tag chg">CHANGED</span></div>
+    <div class="t">MicroVM · Node.js 24</div>
+    <div class="s">beevm-agent on vsock<br>long-lived shim.js → handler(event)<br>zip package in /run/beevm/code</div>
+  </div>
+  <div class="card" style="left:780px;top:1080px;width:320px;height:150px">
+    <div class="t">MicroVM · static binary</div>
+    <div class="s">beevm-agent on vsock<br>exec: JSON stdin → stdout<br>function runs as user fn (uid 1000)</div>
+  </div>
+
+  <!-- ===== Measured ===== -->
+  <div class="panel" style="left:1180px;top:1060px;width:370px;height:215px;background:#fff">
+    <div class="plabel">Measured on WSL2</div>
+    <div class="kv" style="position:absolute;left:20px;right:20px;top:44px">
+      <span>Warm call</span><b>p50 1.6 · p99 5.0 ms</b>
+      <span>Restore, VM ready</span><b>p50 45 · p99 60–67 ms</b>
+      <span>Fn-snapshot start</span><b>py 58 · node 85 · bin 73 ms</b>
+      <span>Cold boot</span><b>≈ 950 ms</b>
+      <span>Isolation attacks</span><b>6 / 6 contained</b>
+    </div>
+    <div class="abs" style="left:20px;top:186px;font-size:12.5px;color:var(--ink3)">&lt; 50 ms target: met at p50; p99 needs the cloud node</div>
+  </div>
+
+  <!-- ===== What changed ===== -->
+  <div class="panel" style="left:50px;top:1310px;width:1500px;height:200px;background:#fff">
+    <div class="plabel" style="color:var(--chg)">What changed since the original diagram</div>
+    <div class="changes" style="position:absolute;left:20px;right:20px;top:46px">
+      <div><b>Runs on WSL2 with nested KVM.</b> The bare-metal / cloud run (M13) and Terraform are not built yet.</div>
+      <div><b>Guest runtimes are Python 3.14 and Node.js 24</b> on Alpine 3.24 (Alpine does not ship 3.12 / 20).</div>
+      <div><b>S3 / MinIO only stores function code.</b> Snapshots stay on local disk; backup to S3 was not built.</div>
+      <div><b>New Code Store</b>: a local sha256 cache in front of S3; no bucket configured means local disk only.</div>
+      <div><b>No Docker anywhere:</b> MinIO is built from source, Prometheus and Grafana run as pinned release binaries.</div>
+      <div><b>Isolation is a mode:</b> default none; jailer + cgroups + netns + nftables with --isolation jailer (sudo).</div>
+      <div><b>beevmd serves the dashboard at /ui/</b>, with a deploy panel; new API: /api/v1/events (SSE), /node, /me.</div>
+      <div><b>Three runners:</b> cold, snapshot, warm (default); per-tenant VM quota; function snapshots built after deploy.</div>
+      <div><b>New Events Hub</b> pushes VM, invoke and deploy events to the dashboard through the pool's state hook.</div>
+      <div><b>Operator CLI beevmd</b> (tenant, key, snapshot, bench, doctor) next to the user CLI beevm (login, init).</div>
+    </div>
+  </div>
+
+  <!-- ===== Arrows ===== -->
+  <svg class="abs" style="left:0;top:0;pointer-events:none" width="1600" height="1540">
+    <defs>
+      <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#4a5260"/></marker>
+      <marker id="ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#2f63d6"/></marker>
+      <marker id="ap" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#9aa1ab"/></marker>
+    </defs>
+    <g fill="none" stroke="#4a5260" stroke-width="1.6" marker-end="url(#a)">
+      <!-- operator: local access, around the gateway to the registry -->
+      <path d="M80 270 H64 V670 H78"/>
+      <!-- clients -> gateway -->
+      <path d="M383 335 V438"/>
+      <path d="M590 335 V438"/>
+      <!-- gateway -> row B -->
+      <path d="M192 532 V588"/>
+      <path d="M457 532 V588"/>
+      <path d="M722 532 V588"/>
+      <!-- pool -> snapshot, pool -> VM manager -->
+      <path d="M835 650 H873"/>
+      <path d="M722 750 V798"/>
+      <!-- VM manager -> isolation, code store -> VM manager -->
+      <path d="M610 880 H572"/>
+      <path d="M875 880 H837"/>
+      <!-- storage -->
+      <path d="M1100 670 H1198"/>
+      <path d="M1100 880 H1198"/>
+      <!-- VM manager -> microVMs -->
+      <path d="M722 960 V1030 H240 V1078"/>
+      <path d="M590 1030 V1078"/>
+      <path d="M722 1030 H940 V1078"/>
+    </g>
+    <!-- pool state hook -> events hub (dashed) -->
+    <path d="M610 690 H572" fill="none" stroke="#4a5260" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#a)"/>
+    <g fill="none" stroke="#2f63d6" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#ao)">
+      <path d="M797 335 V438"/>
+      <path d="M1004 335 V438"/>
+    </g>
+    <path d="M1500 335 V438" fill="none" stroke="#9aa1ab" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#ap)"/>
+  </svg>
+
+  <!-- arrow labels -->
+    <div class="alabel" style="left:393px;top:376px">REST /api/v1</div>
+  <div class="alabel" style="left:600px;top:376px">POST /invoke</div>
+  <div class="alabel opt" style="left:807px;top:376px">REST + SSE</div>
+  <div class="alabel opt" style="left:1014px;top:376px">GET /metrics</div>
+  <div class="alabel plan" style="left:1340px;top:376px">M13: move to bare metal</div>
+  <div class="alabel" style="left:200px;top:551px">auth + lookup</div>
+  <div class="alabel" style="left:465px;top:551px">subscribe</div>
+  <div class="alabel" style="left:730px;top:551px">acquire VM</div>
+  <div class="alabel" style="left:730px;top:765px">create / restore</div>
+  <div class="alabel" style="left:1110px;top:648px;font-size:12px">mmap load</div>
+  <div class="alabel" style="left:1110px;top:858px;font-size:12px">get / put</div>
+  <div class="alabel" style="left:732px;top:984px">Firecracker API · vsock: /resume /package /load /invoke</div>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,6 @@
+2026-11-17 09:24:26 $ ./bin/beevm invoke hello-python --payload {"name":"Om"} -v
+function log:
+hello-python: greeting Om
+{"greeting":"Hello, Om!","runtime":"python"}
+vm ab75edfc: restore (runtime snapshot) 161 ms, upload 15 ms, load 92 ms, function 3 ms, server total 298 ms, round trip 304 ms
+code cache: hit, fetch 0 ms

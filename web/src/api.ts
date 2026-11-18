@@ -45,6 +45,18 @@ export interface InvokeEvent {
   function_ms: number
   duration_ms: number
   at: string
+  // async calls only (POST /invoke/{name}?async=1): the id from the 202 answer, time spent in
+  // the server's queue (included in duration_ms), and why it failed without a result
+  request_id?: string
+  async?: boolean
+  queued_ms?: number
+  error?: string
+}
+
+// InvokeAccepted is the 202 answer to an async invoke.
+export interface InvokeAccepted {
+  request_id: string
+  queued: number
 }
 
 // The "function" event: a function was deployed (created or replaced) or deleted.
@@ -55,6 +67,28 @@ export interface FunctionEvent {
 
 export interface Me {
   tenant: string
+}
+
+// A snapshot on the node (GET /api/v1/snapshots). Runtime snapshots are shared by every tenant;
+// function snapshots are listed for the caller's own functions only.
+export interface Snapshot {
+  key: string
+  kind: 'runtime' | 'function'
+  runtime: string
+  function?: string // function snapshots: '' when the function was removed since
+  memory_mib: number
+  vcpus: number
+  isolation?: string
+  size_bytes: number
+  build_ms: number
+  created_at: string
+  current: boolean // false = stale (older images or settings), no longer used
+}
+
+export interface SnapshotList {
+  runtime: Snapshot[]
+  function: Snapshot[]
+  runtime_delete_allowed: boolean // beevmd serve --allow-runtime-snapshot-delete
 }
 
 export interface NodeInfo {
@@ -205,6 +239,29 @@ export class Client {
     })
   }
 
+  // cool throws away a function's warm VMs (name; count = how many, default all) or all of
+  // yours (no name), so the next call is a cold start again. Returns how many VMs it affected.
+  async cool(name?: string, count?: number): Promise<number> {
+    const path = name
+      ? `/api/v1/functions/${encodeURIComponent(name)}/cool${count ? `?count=${count}` : ''}`
+      : '/api/v1/vms/cool'
+    return (await this.json<{ cooled: number }>('POST', path)).cooled
+  }
+
+  snapshots(signal?: AbortSignal): Promise<SnapshotList> {
+    return this.json<SnapshotList>('GET', '/api/v1/snapshots', signal)
+  }
+
+  // deleteSnapshot removes one snapshot (204). A runtime snapshot needs the server's
+  // --allow-runtime-snapshot-delete (403 otherwise); another tenant's is 404.
+  async deleteSnapshot(key: string): Promise<void> {
+    const r = await fetch(`${this.base}/api/v1/snapshots/${encodeURIComponent(key)}`, {
+      method: 'DELETE',
+      headers: this.headers(),
+    })
+    if (!r.ok) throw new ApiError(r.status, errorText(r.status, await r.text()))
+  }
+
   // deleteFunction removes a function, its VMs and its snapshot (204 No Content).
   async deleteFunction(name: string): Promise<void> {
     const r = await fetch(`${this.base}/api/v1/functions/${encodeURIComponent(name)}`, {
@@ -227,5 +284,19 @@ export class Client {
     const roundTripMs = performance.now() - t0
     if (!r.ok && r.status !== 502) throw new ApiError(r.status, errorText(r.status, body))
     return { status: r.status, ok: r.ok, body, timing: parseTiming(r.headers), roundTripMs }
+  }
+
+  // invokeAsync queues a call on the server (like Lambda's "Event" invocation) and returns at
+  // once with its request id; the result comes later as an "invoke" event with that id.
+  // 429 (queue full) and other errors throw ApiError.
+  async invokeAsync(name: string, payload: string): Promise<InvokeAccepted> {
+    const r = await fetch(`${this.base}/invoke/${encodeURIComponent(name)}?async=1`, {
+      method: 'POST',
+      headers: this.headers({ 'Content-Type': 'application/json' }),
+      body: payload,
+    })
+    const body = await r.text()
+    if (r.status !== 202) throw new ApiError(r.status, errorText(r.status, body))
+    return JSON.parse(body) as InvokeAccepted
   }
 }

@@ -1,0 +1,23 @@
+2026-11-17 09:24:28 $ ./bin/beevmd snapshot ls
+KEY                      KIND      RUNTIME  ISOLATION     FUNCTION       MEMORY   VCPUS  SIZE     BUILD    CREATED              STATUS
+fn-0376c0e08d93ed5da34a  function  python   none          14 (tenant 1)  128 MiB  1      128 MiB  802 ms   2026-11-17 09:24:27  current
+fn-504cf79bccbc27e600c3  function  binary   none          1 (tenant 1)   128 MiB  1      128 MiB  796 ms   2026-11-17 09:24:26  current
+fn-83ce938a2bf43f78d6f7  function  binary   none          9 (tenant 2)   128 MiB  1      128 MiB  481 ms   2026-11-17 09:06:10  current
+fn-e0468ca18a49f30c0079  function  binary   none          13 (tenant 2)  128 MiB  1      128 MiB  451 ms   2026-11-17 09:06:09  current
+fn-504cbce45d4ee983e5fd  function  binary   none          8 (tenant 2)   128 MiB  1      128 MiB  460 ms   2026-11-17 09:06:09  current
+fn-eed771b187dbabe486d9  function  binary   none          12 (tenant 2)  128 MiB  1      128 MiB  467 ms   2026-11-17 09:06:09  current
+fn-84c25992b917602e6a9b  function  binary   none          7 (tenant 2)   128 MiB  1      128 MiB  448 ms   2026-11-17 09:06:09  current
+fn-71c2d67184cdcbfe0b37  function  binary   none          11 (tenant 2)  128 MiB  1      128 MiB  439 ms   2026-11-17 09:06:09  current
+fn-f96a6d22b46eae629049  function  binary   none          6 (tenant 2)   128 MiB  1      128 MiB  450 ms   2026-11-17 09:06:09  current
+fn-d777d9445c353b70837d  function  binary   none          10 (tenant 2)  128 MiB  1      128 MiB  443 ms   2026-11-17 09:06:08  current
+fn-a9a5ecea3133e31fdeb8  function  binary   none          3 (tenant 2)   128 MiB  1      128 MiB  555 ms   2026-11-17 09:05:45  current
+fn-792b6732465907184718  function  node     none          5 (tenant 2)   128 MiB  1      128 MiB  611 ms   2026-11-17 09:05:05  current
+fn-7364449480a5ddf48f84  function  python   none          4 (tenant 2)   128 MiB  1      128 MiB  507 ms   2026-11-17 09:05:04  current
+fn-9b8df60f49ab77f06490  function  binary   jailer-net-1  2 (tenant 1)   128 MiB  1      128 MiB  491 ms   2026-11-17 08:59:08  current
+57b9bf6bd98cd8a3e068     runtime   python   jailer-net-1  -              128 MiB  1      128 MiB  2223 ms  2026-11-17 08:59:06  current
+1c4e77d987f9f0a0b06d     runtime   node     jailer-net-1  -              128 MiB  1      128 MiB  2375 ms  2026-11-17 08:59:04  current
+fn-155e26f5977ac0107f0b  function  binary   none          2 (tenant 1)   128 MiB  1      128 MiB  451 ms   2026-11-07 10:16:45  current
+62c989e7d9b82b6def69     runtime   python   none          -              128 MiB  1      128 MiB  2115 ms  2026-11-07 09:44:28  current
+cbbf3e51d90403968f8e     runtime   node     none          -              128 MiB  1      128 MiB  2607 ms  2026-11-07 09:44:26  current
+07572d68d46a5e6df11c     runtime   binary   jailer-net-1  -              128 MiB  1      128 MiB  2100 ms  2026-11-06 06:24:43  current
+4515a423f6588bfc129e     runtime   binary   none          -              128 MiB  1      128 MiB  2164 ms  2026-11-06 06:21:28  current

@@ -97,7 +97,7 @@ Good reasons to refine: a test is flaky, code is hard to read, you don't underst
 
 ## M12: Benchmarks and density
 - **Goal:** the numbers for all three grading points.
-- **Do:** `cmd/beevm-bench`, k6 scripts, `bench/plot_results.py`: cold start p50/p99 (boot vs restore vs warm), throughput, **max idle VMs per node** and memory per VM, isolation results table.
+- **Do:** `beevmd bench density` (instead of a separate `cmd/beevm-bench`, so it shares helpers with `bench coldstart`/`load`), k6 scripts in `bench/k6/`, `bench/plot_results.py`: cold start p50/p99 (boot vs restore vs warm), throughput, **max idle VMs per node** and memory per VM, isolation results table.
 - **Done when:** `make bench` produces charts and a results file that goes straight into the report.
 - **Refine later:** reruns on a different machine, clearer charts.
 

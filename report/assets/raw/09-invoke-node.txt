@@ -1,0 +1,6 @@
+2026-11-17 09:24:27 $ ./bin/beevm invoke hello-node --payload {"name":"ACC"} -v
+function log:
+hello-node: greeting ACC
+{"greeting":"Hello, ACC!","runtime":"node"}
+vm 3d6b6585: restore (runtime snapshot) 170 ms, upload 13 ms, load 375 ms, function 12 ms, server total 598 ms, round trip 601 ms
+code cache: hit, fetch 0 ms

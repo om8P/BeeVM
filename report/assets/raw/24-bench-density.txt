@@ -1,0 +1,23 @@
+2026-11-17 09:31:27 $ bash -c sed -n "/density: one function/,/wrote .*one-function/p" /tmp/bench-run.log | grep -v "^{" | tail -22
+   80 VMs  idle    80  PSS   3.4 MiB  RSS  22.9 MiB  host   3.9 MiB per VM  available   5923 MiB  warm p50 2.4 ms p99 24.1 ms
+  100 VMs  idle   100  PSS   3.1 MiB  RSS  22.6 MiB  host   3.8 MiB per VM  available   5859 MiB  warm p50 2.8 ms p99 25.9 ms
+  120 VMs  idle   120  PSS   2.9 MiB  RSS  22.5 MiB  host   3.7 MiB per VM  available   5799 MiB  warm p50 2.8 ms p99 31.0 ms
+  140 VMs  idle   140  PSS   2.7 MiB  RSS  22.4 MiB  host   3.6 MiB per VM  available   5740 MiB  warm p50 2.9 ms p99 31.1 ms
+  160 VMs  idle   160  PSS   2.6 MiB  RSS  22.3 MiB  host   3.5 MiB per VM  available   5677 MiB  warm p50 2.6 ms p99 31.0 ms
+  180 VMs  idle   180  PSS   2.5 MiB  RSS  22.2 MiB  host   3.5 MiB per VM  available   5608 MiB  warm p50 2.5 ms p99 32.0 ms
+  200 VMs  idle   200  PSS   2.5 MiB  RSS  22.2 MiB  host   3.5 MiB per VM  available   5545 MiB  warm p50 3.2 ms p99 31.7 ms
+
+stopped: reached --max 200
+
+  VMs  idle  PSS MiB/VM  RSS MiB/VM  host MiB/VM  available MiB  warm p50 ms  warm p99 ms  failed
+   20    20         7.0        26.6          6.8           6104          2.1         21.5       0
+   40    40         4.9        24.0          4.9           6044          2.4         22.3       0
+   60    60         3.9        23.2          4.2           5984          2.4         23.0       0
+   80    80         3.4        22.9          3.9           5923          2.4         24.1       0
+  100   100         3.1        22.6          3.8           5859          2.8         25.9       0
+  120   120         2.9        22.5          3.7           5799          2.8         31.0       0
+  140   140         2.7        22.4          3.6           5740          2.9         31.1       0
+  160   160         2.6        22.3          3.5           5677          2.6         31.0       0
+  180   180         2.5        22.2          3.5           5608          2.5         32.0       0
+  200   200         2.5        22.2          3.5           5545          3.2         31.7       0
+wrote bench/results/m12/20261117-090325/density-one-function-20261117-090608.md

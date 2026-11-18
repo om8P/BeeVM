@@ -60,7 +60,7 @@ func newRoot() *cobra.Command {
 	}
 	root.PersistentFlags().StringVar(&s.url, "url", "", "server address (default $BEEVM_URL, then the saved login, then "+defaultURL+")")
 	root.PersistentFlags().StringVar(&s.key, "key", "", "API key (default $BEEVM_API_KEY, then the saved login)")
-	root.AddCommand(newDeploy(&s), newInvoke(&s), newLs(&s), newGet(&s), newRm(&s), newPrewarm(&s), newVMs(&s),
+	root.AddCommand(newDeploy(&s), newInvoke(&s), newLs(&s), newGet(&s), newRm(&s), newPrewarm(&s), newCool(&s), newVMs(&s),
 		newLogin(&s), newLogout(), newWhoami(&s), newInit())
 	return root
 }

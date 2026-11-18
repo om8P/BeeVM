@@ -1,0 +1,41 @@
+2026-11-17 09:31:27 $ bash -c sed -n "/cold start: binary/,/wrote/p" /tmp/bench-run.log | head -40
+== cold start: binary (20 runs per mode)
+== boot: 1 warm-up + 20 measured runs, one at a time
+   10/20  (last: ready 982.2 ms, first response 999.6 ms)
+   20/20  (last: ready 997.6 ms, first response 1014.2 ms)
+== restore: 1 warm-up + 20 measured runs, one at a time
+   10/20  (last: ready 64.2 ms, first response 117.2 ms)
+   20/20  (last: ready 49.0 ms, first response 102.7 ms)
+== building snapshot fn-ef4b6e4abf61ac237f22 (binary function 0, 128 MiB, 1 vCPU)
+== snapshot fn-ef4b6e4abf61ac237f22 ready in 556 ms
+== function: 1 warm-up + 20 measured runs, one at a time
+   10/20  (last: ready 33.5 ms, first response 70.5 ms)
+   20/20  (last: ready 60.0 ms, first response 92.8 ms)
+== warm: 1 warm-up + 20 measured runs, one at a time
+   10/20  (last: ready 0.0 ms, first response 1.8 ms)
+   20/20  (last: ready 0.0 ms, first response 1.3 ms)
+
+      mode       metric (ms)     p50     p90     p99     max  runs
+      boot          vm ready   967.6   993.3   997.6   997.6    20
+      boot            upload    14.6    16.5    18.0    18.0    20
+      boot            invoke     3.1     3.9     4.2     4.2    20
+      boot    first response   986.7  1011.2  1014.2  1014.2    20
+   restore             spawn     1.5     1.7     2.3     2.3    20
+   restore              load    23.4    31.3    39.4    39.4    20
+   restore             agent    22.7    25.1    36.2    36.2    20
+   restore      attempts (n)     1.0     1.0     1.0     1.0    20
+   restore  faults agent (n)   581.0   600.0   604.0   604.0    20
+   restore   faults call (n)  1493.0  1499.0  1505.0  1505.0    20
+   restore          vm ready    48.2    59.4    67.9    67.9    20
+   restore            upload    30.3    34.3   112.0   112.0    20
+   restore            invoke    22.7    25.2    31.5    31.5    20
+   restore    first response   102.8   117.2   181.4   181.4    20
+  function             spawn     1.5     1.8     2.3     2.3    20
+  function              load    23.8    36.5    39.6    39.6    20
+  function             agent    19.5    21.5    24.8    24.8    20
+  function      attempts (n)     1.0     1.0     1.0     1.0    20
+  function  faults agent (n)   511.0   524.0   532.0   532.0    20
+  function   faults call (n)   572.0   579.0   585.0   585.0    20
+  function          vm ready    45.8    58.2    60.0    60.0    20
+  function            invoke    32.8    37.0    46.4    46.4    20
+  function    first response    77.8    92.8   102.8   102.8    20

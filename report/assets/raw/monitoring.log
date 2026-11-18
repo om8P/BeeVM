@@ -1,0 +1,5 @@
+[1;32m[beevm][0m already done: prometheus 3.15.1
+[1;32m[beevm][0m already done: grafana 13.3.0
+[1;34m[beevm][0m Prometheus http://127.0.0.1:9090  (log: /home/ommhatre/.beevm/monitoring/logs/prometheus.log)
+[1;34m[beevm][0m Grafana    http://localhost:3000   dashboard BeeVM (log: /home/ommhatre/.beevm/monitoring/logs/grafana.log)
+[1;34m[beevm][0m start beevmd serve in another terminal; Ctrl-C here stops both

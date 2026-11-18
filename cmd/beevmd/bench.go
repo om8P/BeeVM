@@ -112,8 +112,12 @@ func runBench(args []string) int {
 	if len(args) > 0 && args[0] == "load" {
 		return runBenchLoad(args[1:])
 	}
+	if len(args) > 0 && args[0] == "density" {
+		return runBenchDensity(args[1:])
+	}
 	if len(args) == 0 || args[0] != "coldstart" {
 		fmt.Fprintln(os.Stderr, "usage: beevmd bench load --fn NAME[,NAME...] [--rate 20] [--duration 1m] [--concurrency 8]   (calls a running server)")
+		fmt.Fprintln(os.Stderr, "       beevmd bench density --fn NAME[,NAME...] [--step 20] [--max 1000] [--reserve 1GiB]   (idle VMs per node, calls a running server)")
 		fmt.Fprintln(os.Stderr, "       beevmd bench coldstart [--runs N] [--mode boot,restore,function,warm] [--code F] [--out DIR]")
 		fmt.Fprintln(os.Stderr, "         [--runtime binary|python|node] [--handler H]")
 		fmt.Fprintln(os.Stderr, "         [--mem N] [--vcpus N] [--probe resume|health] [--gap D] [--cold-cache]")

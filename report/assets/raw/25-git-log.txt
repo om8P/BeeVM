@@ -1,0 +1,32 @@
+2026-11-17 09:31:27 $ git log --reverse --format=%h  %ad  %s --date=format:%Y-%m-%d %H:%M
+2a0cd3d  2026-10-22 22:50  Add BeeVM planning docs and project setup
+40c3900  2026-10-22 23:16  Add 13-milestone session guide
+77d22dd  2026-10-23 00:00  Milestone 1: environment and hand-booted MicroVM
+8c5b82b  2026-10-23 00:48  Milestone 2: boot and stop a VM from Go
+676f514  2026-10-23 00:50  Stop tracking the course case-study document
+cc94e06  2026-10-23 00:56  Rename Go module to github.com/OmMhatre-99/BeeVM
+0337349  2026-10-23 02:27  Add step-by-step build guide
+cc2abee  2026-10-23 02:32  Move guide and learning notes to developer-guide/ and track them
+7d9796c  2026-10-24 14:52  Milestone 3: guest agent over vsock, first function runs
+18d004a  2026-10-24 15:59  Rename Go module to github.com/om8P/BeeVM
+5dbcc40  2026-10-26 04:28  Update build guide and learning notes through milestone 3
+840f19c  2026-10-26 05:46  Milestone 4: HTTP API, registry and CLI
+92e55be  2026-10-26 14:07  Milestone 5: artifact store with MinIO/S3
+128e86b  2026-10-26 15:13  Update build guide and learning notes through milestone 5
+d3d5406  2026-10-27 02:35  Add demonstration script for milestones 1 to 5
+c2571a4  2026-10-27 05:13  Milestone 6: snapshots and fast restore
+826a83f  2026-10-27 06:06  Update build guide and learning notes for milestone 6
+c60df43  2026-11-03 02:10  Refine milestone 6: faster, steadier snapshot restore
+a99367a  2026-11-03 03:20  Document the milestone 6 refines in full detail
+64cb026  2026-11-03 04:20  Milestone 7: warm pool
+b1acdbb  2026-11-03 04:30  Update build guide for milestone 7
+565d2c0  2026-11-03 04:47  Update learning notes for milestone 7
+fdb7fc3  2026-11-06 03:58  Milestone 8: Python and Node.js runtimes, function snapshots
+d65f375  2026-11-06 12:06  Milestone 9: isolation and networking
+7d11342  2026-11-06 13:01  Milestone 10: observability
+1037e5c  2026-11-06 14:29  Milestone 11: web dashboard
+9bc9b9b  2026-11-07 14:28  Update build guide, learning notes and demo through milestone 11
+7c2ac17  2026-11-16 13:53  Add matrix example function
+ef3b241  2026-11-16 13:53  Milestone 11 refine: function filter, live function list, tenant name, smaller bundle
+fd856fe  2026-11-17 13:34  Usability: README, function logs, make demo, doctor, login, tenant cap
+7a26ee9  2026-11-17 13:38  Update cited commit hashes after cleaning up commit messages

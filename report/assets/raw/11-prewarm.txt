@@ -1,0 +1,2 @@
+2026-11-17 09:24:27 $ ./bin/beevm prewarm hello -n 3
+started 3 of 3 VMs for hello in 61 ms

@@ -22,6 +22,11 @@ type (
 	Drainer interface {
 		Drain(functionID int64)
 	}
+	// Cooler throws away up to max of a function's warm VMs on request (max <= 0: all), so its
+	// next call is a cold start; it returns how many VMs that affected.
+	Cooler interface {
+		Cool(functionID int64, max int) int
+	}
 	// VMLister lists the VMs of one tenant (tenantID <= 0: all).
 	VMLister interface {
 		VMs(tenantID int64) []pool.VMInfo
@@ -206,6 +211,9 @@ func (w *WarmRunner) Prewarm(ctx context.Context, req Request, n int) (int, erro
 
 // Drain implements Drainer.
 func (w *WarmRunner) Drain(functionID int64) { w.pool.Drain(functionID) }
+
+// Cool implements Cooler.
+func (w *WarmRunner) Cool(functionID int64, max int) int { return w.pool.Cool(functionID, max) }
 
 // VMs implements VMLister.
 func (w *WarmRunner) VMs(tenantID int64) []pool.VMInfo { return w.pool.Stats(tenantID) }

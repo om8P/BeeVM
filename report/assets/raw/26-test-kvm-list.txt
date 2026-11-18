@@ -1,0 +1,3 @@
+2026-11-17 09:31:27 $ bash -c grep -rhoE "^func (Test[A-Za-z0-9_]+)" --include="*_kvm_test.go" internal | wc -l | xargs echo "KVM integration test functions:"; grep -rlE "//go:build kvm" internal | wc -l | xargs echo "files tagged //go:build kvm:"
+KVM integration test functions: 34
+files tagged //go:build kvm: 13

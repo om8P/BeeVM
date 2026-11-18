@@ -1,0 +1,31 @@
+2026-11-17 09:24:28 $ bash -c curl -s -H "Authorization: Bearer $BEEVM_API_KEY" 127.0.0.1:8080/api/v1/node | python3 -m json.tool
+{
+    "max_vms": 16,
+    "vms": 6,
+    "tenant_vms": 6,
+    "states": {
+        "busy": 0,
+        "idle": 6,
+        "recycling": 0,
+        "restoring": 0
+    },
+    "measured_vms": 6,
+    "pss_bytes": 113314816,
+    "rss_bytes": 178499584,
+    "mem_total_bytes": 8183283712,
+    "mem_available_bytes": 6207152128
+}
+
+2026-11-17 09:24:28 $ bash -c curl -s 127.0.0.1:8080/metrics | grep -E "^beevm_(invocations_total|vms\{|vm_memory_pss_bytes)" | head -20
+beevm_invocations_total{function="hello",runtime="binary",start="restore",status="ok",tenant="demo"} 1
+beevm_invocations_total{function="hello-node",runtime="node",start="restore",status="ok",tenant="demo"} 1
+beevm_invocations_total{function="hello-python",runtime="python",start="restore",status="ok",tenant="demo"} 1
+beevm_invocations_total{function="hello-python",runtime="python",start="warm",status="ok",tenant="demo"} 1
+beevm_vm_memory_pss_bytes{state="busy"} 0
+beevm_vm_memory_pss_bytes{state="idle"} 1.13314816e+08
+beevm_vm_memory_pss_bytes{state="recycling"} 0
+beevm_vm_memory_pss_bytes{state="restoring"} 0
+beevm_vms{state="busy"} 0
+beevm_vms{state="idle"} 6
+beevm_vms{state="recycling"} 0
+beevm_vms{state="restoring"} 0

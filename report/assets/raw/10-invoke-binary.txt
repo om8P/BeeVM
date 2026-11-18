@@ -1,0 +1,6 @@
+2026-11-17 09:24:27 $ ./bin/beevm invoke hello --payload {"name":"BeeVM"} -v
+function log:
+hello-go-binary: greeting BeeVM
+{"greeting":"Hello, BeeVM!","runtime":"binary"}
+vm 5f484d8b: restore (function snapshot) 72 ms, upload 0 ms, load 0 ms, function 38 ms, server total 119 ms, round trip 123 ms
+code cache: hit, fetch 0 ms

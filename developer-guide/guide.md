@@ -2092,6 +2092,42 @@ The chart's y axis used to end at 2 s, and Recharts does not draw dots outside t
 
 The range logic is in `stats.ts` (`yTop`, `yTicks`, `fmtAxisMs`, tested in `logic.test.ts`). Checked against a real server with `testfn` sleeping 6 s and 12 s: Auto went from 2s to 30s, all dots drawn; 2s showed both slow calls on the top edge with the note.
 
+### 14.12 Deleting snapshots from the dashboard (2026-11-18)
+
+A **Snapshots** panel at the bottom lists the two kinds separately, each row with a Delete button:
+
+| | Runtime snapshots | Function snapshots |
+|---|---|---|
+| What | one per runtime and VM size: a VM with the agent (and python3 / node) running | one per function: the runtime snapshot plus this function's code imported |
+| Who uses it | **every tenant** on the node | one tenant's one function |
+| Shown to | everyone | its own tenant only (other tenants' are never listed; deleting one is 404, not 403, so it is not even confirmed to exist) |
+| Delete allowed | only when the operator starts `serve --allow-runtime-snapshot-delete` (else 403, button disabled with the reason) | always, by its tenant |
+| After deleting | the next cold start of that runtime waits for the rebuild (measured 2.87 s; parallel calls share one build) | the next cold start restores the runtime snapshot and imports (a few tens of ms slower); that call rebuilds it in the background |
+
+New core API (additive): `GET /api/v1/snapshots` and `DELETE /api/v1/snapshots/{key}` in `internal/api/snapshots.go`, given the Snapshot Manager through the small interface `api.SnapshotStore` (List, Remove) so tests use a fake. Nothing else had to change: the manager reads snapshots from disk every time it needs one, so a deleted snapshot is simply built again; a running VM keeps its already-open memory file.
+
+Why a flag and not a permission system: all API keys are tenant keys. A shared, node-wide action needs either an operator role (a bigger change to the registry and every route) or the operator's consent at start-up; the flag is the small version of the second.
+
+Tests: `TestSnapshotListShowsOnlyOwnFunctionSnapshots`, `TestSnapshotDeleteRules`, `TestSnapshotRuntimeDeleteWhenAllowed`, `TestSnapshotRoutesWithoutSnapshots`. By hand against a real server with tenants alice and bob: alice saw all runtime snapshots and only her own function snapshot; direct API calls got 403 (runtime, flag off) and 404 (bob's); her function snapshot deleted, the next call worked from the runtime snapshot (import 36 ms) and rebuilt it; with the flag, the Python runtime snapshot deleted, a function with a function snapshot still started in 78 ms, and without one two parallel cold starts waited for one shared rebuild (2.87 s) and both answered 200.
+
+
+### 14.13 Cooling warm VMs (2026-11-18)
+
+A warm VM makes the next call of its function fast (1-3 ms), which is the point of the pool, but it hides cold starts when you want to show or measure them. Before, the only ways to get a cold start again were waiting for `--keep-alive` or restarting the server. Now **Cool** (per function, in the pools table), **Cool all** (panel header), `beevm cool <name>` / `beevm cool --all` and `POST /api/v1/functions/{name}/cool` / `POST /api/v1/vms/cool` throw the warm VMs away; the next call is restored from a snapshot.
+
+| VM state when cooled | What happens |
+|---|---|
+| idle | recycled now (reason "cooled on request", metric label `cooled`) |
+| busy | finishes its call, then is thrown away instead of kept |
+| being created for a call | serves that call, then is thrown away |
+| being created by a prewarm | dropped when ready (no call waits for it) |
+
+**Cooling only some VMs:** `Cool` takes a count (`beevm cool hello -n 2`, `?count=2`, and in the dashboard the same number box as Prewarm). It picks the VMs that make the next calls cold soonest: idle ones first, least recently used first, then busy ones (they go after their call), then ones still starting. Without a count every VM of the function goes. The messages only promise a cold next call when nothing of the function is left warm ("cooled 3 VMs (any others stay warm)" in the CLI, "cooled 2 VMs, 1 still warm" in the dashboard).
+
+**Why not just `Drain`:** the pool already had `Drain` for redeploys and deletes, but there the function's code changed, so a VM still being created must *not* be handed to the waiting call (it fails, `TestDrainWhileCreating`). A cool changes nothing about the function, so it must never fail a call; it gets its own `cooled` flag, and `Drain` stays exactly as it was.
+
+Tests: `TestCool`, `TestCoolWhileCreating`, `TestRecycleReasonCooled` (pool), `TestCoolRoutes` (own functions only, other tenant 404), `TestCoolWithoutWarmPool` (501), `TestCoolArguments` (CLI). On a real server: restore, warm, `cool` (1 VM), next call a restore on a new VM; prewarm 2 + `cool --all` = 3 VMs; the dashboard's buttons are disabled with no warm VMs and the tiles disappear live after a cool.
+
 ---
 
 ## Appendix A: command cheat sheet

@@ -78,6 +78,10 @@ func runServe(args []string) int {
 	addr := fs.String("addr", "127.0.0.1:8080", "address to listen on (localhost only by default)")
 	maxVMs := fs.Int("max-vms", 8, "most VMs running at the same time")
 	maxPerTenant := fs.Int("max-vms-per-tenant", 0, "warm runner: most VMs one tenant may have, so one tenant cannot push out the others' warm VMs; 0 = no limit")
+	asyncQueue := fs.Int("async-queue", api.DefaultAsyncQueueSize, "async invoke (POST /invoke/{name}?async=1): most calls waiting in the queue, all tenants (-1 = async invoke off)")
+	asyncPerTenant := fs.Int("async-per-tenant", api.DefaultAsyncPerTenant, "async invoke: most queued calls of one tenant")
+	asyncMaxAge := fs.Duration("async-max-age", api.DefaultAsyncMaxAge, "async invoke: a call that waited longer in the queue is dropped")
+	allowRuntimeSnapDelete := fs.Bool("allow-runtime-snapshot-delete", false, "let tenants delete runtime snapshots through the API and dashboard (they are shared by every tenant: the next cold start of that runtime waits for a rebuild); tenants can always delete their own function snapshots")
 	queueWait := fs.Duration("queue-wait", 5*time.Second, "how long a call waits for a free VM slot before getting 503")
 	runnerKind := fs.String("runner", "warm", "how calls get a VM: warm (keep VMs between calls, new ones restored from a snapshot), snapshot (restore for every call) or cold (full boot every call)")
 	keepAlive := fs.Duration("keep-alive", 60*time.Second, "warm runner: how long an idle VM is kept for its function's next call")
@@ -218,6 +222,7 @@ func runServe(args []string) int {
 	}
 
 	var run runner.Runner
+	var snapStore api.SnapshotStore // set when the runner keeps snapshots (snapshot, warm)
 	switch *runnerKind {
 	case "cold":
 		c := runner.NewColdRunner(base, *maxVMs, *queueWait)
@@ -231,6 +236,7 @@ func runServe(args []string) int {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			return 1
 		}
+		snapStore = snaps
 		if *runnerKind == "snapshot" {
 			s := runner.NewSnapshotRunner(base, snaps, *maxVMs, *queueWait, logger)
 			for rt, path := range images {
@@ -268,6 +274,8 @@ func runServe(args []string) int {
 
 	apiServer := api.New(api.Deps{
 		Registry: reg, Code: code, Logger: logger, Runner: run, Metrics: mets, Events: hub,
+		Snapshots: snapStore, AllowRuntimeSnapshotDelete: *allowRuntimeSnapDelete,
+		AsyncQueueSize: *asyncQueue, AsyncPerTenant: *asyncPerTenant, AsyncMaxAge: *asyncMaxAge,
 	})
 	handler := apiServer.Handler()
 	*uiDir = findUIDir(*uiDir, os.Executable)
@@ -300,6 +308,7 @@ func runServe(args []string) int {
 	select {
 	case err := <-errCh:
 		fmt.Fprintln(os.Stderr, "error:", err)
+		apiServer.Close()
 		closeRunner()
 		return 1
 	case <-sigCtx.Done():
@@ -317,9 +326,11 @@ func runServe(args []string) int {
 		logger.Warn("shutdown did not finish cleanly", "error", err)
 		_ = srv.Close() // cancels the remaining requests; their VMs are killed and cleaned up
 		time.Sleep(500 * time.Millisecond)
+		apiServer.Close()
 		closeRunner()
 		return 1
 	}
+	apiServer.Close() // queued async calls are dropped, running ones cancelled
 	closeRunner()
 	logger.Info("stopped")
 	return 0

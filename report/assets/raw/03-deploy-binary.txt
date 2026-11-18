@@ -1,0 +1,2 @@
+2026-11-17 09:24:25 $ ./bin/beevm deploy hello bin/functions/hello-go-binary
+updated hello (binary): 2.5 MB, 128 MiB, 1 vCPU, timeout 10s

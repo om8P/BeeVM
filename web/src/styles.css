@@ -457,6 +457,26 @@ label.check input {
 .invoke button {
   margin-top: 10px;
 }
+.invoke-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.invoke .burst {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 10px;
+  font-size: 13px;
+}
+.invoke .burst input {
+  width: 64px;
+}
+.invoke .hint {
+  font-size: 12px;
+  margin: 6px 0 0;
+}
 .result {
   margin-top: 12px;
   border-top: 1px solid var(--border);
@@ -529,6 +549,9 @@ td.num {
 /* chart */
 .chart-box {
   min-height: 260px;
+  /* The chart's SVG is sized by a ResizeObserver; until it reacts to a narrower screen the old,
+     wider SVG must not make the whole page scroll sideways. */
+  overflow: hidden;
 }
 .axis-title {
   font-size: 12px;
@@ -600,6 +623,12 @@ button.link-btn {
 .prewarm {
   display: flex;
   gap: 4px;
+}
+.cool-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .prewarm input {
   width: 46px;
@@ -682,6 +711,39 @@ button.link-btn {
 .deploy-done p {
   margin: 0 0 6px;
 }
+/* snapshots */
+.snapshots {
+  margin-bottom: 12px;
+}
+.snapshots h3 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 4px 0 2px;
+}
+.snap-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+}
+.snap-help {
+  margin: 0 0 6px;
+}
+.snaps td,
+.snaps th {
+  vertical-align: middle;
+}
+.nowrap {
+  white-space: nowrap;
+}
+.badge.stale {
+  color: var(--muted);
+}
+@media (max-width: 900px) {
+  .snap-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 button.danger {
   color: var(--error);
   border-color: color-mix(in srgb, var(--error) 45%, transparent);

@@ -1,0 +1,11 @@
+2026-11-17 09:24:27 $ ./bin/beevm prewarm hello -n 3
+started 3 of 3 VMs for hello in 61 ms
+
+2026-11-17 09:24:28 $ ./bin/beevm vms
+VM        FUNCTION      STATE  FOR    CALLS  ADDRESS
+3d6b6585  hello-node    idle   400ms  1      -
+5f484d8b  hello         idle   200ms  1      -
+783d90af  hello         idle   100ms  0      -
+9f0f2638  hello         idle   100ms  0      -
+ab75edfc  hello-python  idle   1.1s   2      -
+d56e01bc  hello         idle   100ms  0      -

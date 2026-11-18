@@ -71,6 +71,12 @@ type PrewarmResult struct {
 	Started   int `json:"started"` // fewer than requested when the node had no more free slots
 }
 
+// CoolResult is the answer to POST /api/v1/functions/{name}/cool and POST /api/v1/vms/cool:
+// how many warm VMs were thrown away (busy ones count too: they go once their call ends).
+type CoolResult struct {
+	Cooled int `json:"cooled"`
+}
+
 // VM is one of the caller's MicroVMs in the warm pool.
 type VM struct {
 	ID       string    `json:"id"`
@@ -113,6 +119,31 @@ const (
 	FunctionDeleted  = "deleted"
 )
 
+// Snapshot is one snapshot on the node, as GET /api/v1/snapshots lists it.
+type Snapshot struct {
+	Key       string    `json:"key"`
+	Kind      string    `json:"kind"` // "runtime" or "function"
+	Runtime   string    `json:"runtime"`
+	Function  string    `json:"function,omitempty"` // function snapshots: the caller's function ("" = removed since)
+	MemoryMiB int64     `json:"memory_mib"`
+	VCPUs     int64     `json:"vcpus"`
+	Isolation string    `json:"isolation,omitempty"` // "" = no isolation
+	SizeBytes int64     `json:"size_bytes"`          // the memory file (most of it)
+	BuildMS   int64     `json:"build_ms"`
+	CreatedAt time.Time `json:"created_at"`
+	Current   bool      `json:"current"` // false = stale: built from older images or settings, no longer used
+}
+
+// SnapshotList is the answer to GET /api/v1/snapshots: the node's runtime snapshots (shared
+// by every tenant) and the caller's own function snapshots.
+type SnapshotList struct {
+	Runtime  []Snapshot `json:"runtime"`
+	Function []Snapshot `json:"function"`
+	// RuntimeDeleteAllowed says whether this server lets tenants delete runtime snapshots
+	// (beevmd serve --allow-runtime-snapshot-delete). Function snapshots: always, own only.
+	RuntimeDeleteAllowed bool `json:"runtime_delete_allowed"`
+}
+
 // Me is the answer to GET /api/v1/me: who the API key belongs to.
 type Me struct {
 	Tenant string `json:"tenant"`
@@ -122,6 +153,21 @@ type Me struct {
 type Hello struct {
 	VMs    []VM `json:"vms"`
 	MaxVMs int  `json:"max_vms"` // VMs on the whole node at most (0 = no warm pool)
+}
+
+// Async invoke (like Lambda's "Event" invocation type): POST /invoke/{name}?async=1, or the
+// request header HeaderInvocationType: "Event". The server puts the call in a queue and answers
+// 202 InvokeAccepted at once; the result arrives later as an "invoke" event with the same
+// RequestID (the function's output is not kept).
+const (
+	HeaderInvocationType = "X-BeeVM-Invocation-Type"
+	InvocationEvent      = "Event"
+)
+
+// InvokeAccepted is the 202 answer to an async invoke.
+type InvokeAccepted struct {
+	RequestID string `json:"request_id"`
+	Queued    int    `json:"queued"` // calls of this tenant waiting in the queue, this one included
 }
 
 // InvokeEvent is the "invoke" event: one finished call of a deployed function.
@@ -138,6 +184,12 @@ type InvokeEvent struct {
 	FunctionMS int64     `json:"function_ms"`
 	DurationMS float64   `json:"duration_ms"` // whole request inside the server, µs precision
 	At         time.Time `json:"at"`          // when it finished
+	// Async calls only: the id the 202 answer gave, the time spent waiting in the queue
+	// (included in DurationMS), and why it failed without a function result (expired, busy).
+	RequestID string  `json:"request_id,omitempty"`
+	Async     bool    `json:"async,omitempty"`
+	QueuedMS  float64 `json:"queued_ms,omitempty"`
+	Error     string  `json:"error,omitempty"`
 }
 
 // Node is the answer to GET /api/v1/node: how full this node is. It counts every tenant's VMs

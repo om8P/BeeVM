@@ -88,6 +88,7 @@ const (
 	ReasonQuota     = "quota"      // tenant at MaxVMsPerTenant, its own least recently used idle VM
 	ReasonUnhealthy = "unhealthy"  // timed out, agent error, caller hung up
 	ReasonDrained   = "drained"    // function redeployed or deleted
+	ReasonCooled    = "cooled"     // its tenant asked for cold starts again (Cool)
 	ReasonClosing   = "closing"    // pool shutting down
 	ReasonExited    = "exited"     // the VM's process ended by itself
 	ReasonOther     = "other"
@@ -106,6 +107,8 @@ func RecycleReason(text string) string {
 		return ReasonUnhealthy
 	case "function changed or removed":
 		return ReasonDrained
+	case "cooled on request":
+		return ReasonCooled
 	case "pool closing":
 		return ReasonClosing
 	case "vm process exited":
@@ -156,6 +159,7 @@ type vmEntry struct {
 	lastUsed time.Time
 	calls    int64
 	drained  bool          // throw away instead of keeping when released
+	cooled   bool          // Cool: serve the current call, then throw away instead of keeping
 	gone     chan struct{} // closed when Destroyed
 	reported string        // the ID OnStateChange last saw (to report "pending-N" -> real ID)
 }
@@ -369,6 +373,17 @@ func (p *Pool) finishCreate(ctx context.Context, e *vmEntry, create CreateFunc, 
 		}
 		return nil, fmt.Errorf("function changed while its VM was being created")
 	}
+	if e.cooled && to == Idle {
+		// A prewarmed VM that was cooled while starting: no call waits for it, so drop it
+		// (like a drained one: Restoring may only become Idle, Busy or Destroyed).
+		p.removeLocked(e)
+		if p.cfg.OnRecycle != nil {
+			p.cfg.OnRecycle(ReasonCooled)
+		}
+		p.mu.Unlock()
+		inst.Destroy()
+		return nil, fmt.Errorf("cooled while its VM was being created")
+	}
 	e.lastUsed = p.cfg.Now()
 	if to == Busy {
 		e.calls++
@@ -425,6 +440,8 @@ func (p *Pool) Release(l *Lease, healthy bool) {
 		p.recycleLocked(e, "unhealthy after a call")
 	case e.drained:
 		p.recycleLocked(e, "function changed or removed")
+	case e.cooled:
+		p.recycleLocked(e, "cooled on request")
 	case p.closed:
 		p.recycleLocked(e, "pool closing")
 	default:
@@ -535,6 +552,45 @@ func (p *Pool) Drain(functionID int64) {
 			p.recycleLocked(e, "function changed or removed")
 		}
 	}
+}
+
+// Cool throws away a function's warm VMs on request, so that its next call is a cold start
+// again (restored from a snapshot): to show or measure cold starts without waiting for the
+// keep-alive. Unlike Drain the function did not change, so nothing running is cut short: idle
+// VMs go now, a busy VM finishes its call and then goes, a VM being created for a call serves
+// that call and then goes; only one being created for a prewarm is dropped when ready.
+//
+// max limits how many VMs are cooled (0 or less: all). The ones that make the next calls cold
+// soonest go first: idle VMs, least recently used first, then busy ones, then ones still being
+// created. It returns how many VMs it affected.
+func (p *Pool) Cool(functionID int64, max int) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var pick []*vmEntry
+	for e := range p.vms {
+		if e.key.FunctionID == functionID && !e.drained && !e.cooled && (e.state == Idle || e.state == Busy || e.state == Restoring) {
+			pick = append(pick, e)
+		}
+	}
+	rank := map[State]int{Idle: 0, Busy: 1, Restoring: 2}
+	sort.Slice(pick, func(i, j int) bool {
+		a, b := pick[i], pick[j]
+		if rank[a.state] != rank[b.state] {
+			return rank[a.state] < rank[b.state]
+		}
+		return a.lastUsed.Before(b.lastUsed)
+	})
+	if max > 0 && len(pick) > max {
+		pick = pick[:max]
+	}
+	for _, e := range pick {
+		if e.state == Idle {
+			p.recycleLocked(e, "cooled on request")
+		} else {
+			e.cooled = true
+		}
+	}
+	return len(pick)
 }
 
 // reap recycles VMs that have been idle for KeepAlive or longer at time now.

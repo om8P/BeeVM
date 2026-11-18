@@ -23,8 +23,9 @@ call of the same function reuses it.
 
 ## Status
 
-Milestones 1 to 11 of 13 are done ([docs/progress.md](docs/progress.md)). The large benchmark and
-density run (12) and the cloud run with the final report (13) are not started.
+Milestones 1 to 12 of 13 are done ([docs/progress.md](docs/progress.md)); the benchmark demo is
+`BENCH_QUICK=1 make bench` (about 5 minutes, see below). The cloud run with the final report (13) is
+not started.
 
 Measured on the development laptop (Windows 11, WSL2 with nested KVM, 1 vCPU and 128 MiB per VM):
 
@@ -191,10 +192,12 @@ flags, else `BEEVM_API_KEY` and `BEEVM_URL`, else what `beevm login` saved
 | `beevm init <python\|node\|binary> [folder]` | write a working starter function |
 | `beevm deploy <name> <path> [--runtime R] [--handler H] [--memory M] [--vcpus N] [--timeout D]` | upload a function, or replace it |
 | `beevm invoke <name> [--payload J \| --payload-file F] [-l] [-v]` | call it; the payload may also be piped in; `-l` prints what the function printed, `-v` that plus timings |
+| `beevm invoke <name> --async [-n N]` | queue N calls on the server and return at once (results: dashboard, server log, event stream) |
 | `beevm get <name>` | one function's settings |
 | `beevm ls` | list your functions |
 | `beevm rm <name>` | remove a function, its VMs and its snapshot |
 | `beevm prewarm <name> -n N` | start N idle VMs so the next calls are warm |
+| `beevm cool <name> [-n N]` / `cool --all` | throw away warm VMs (all of the function's, or only N: idle ones first, least recently used first), so the next call is a cold start again; to show or measure cold starts without waiting for the keep-alive |
 | `beevm vms` | list your VMs and their states |
 
 `get`, `ls`, `vms` and `whoami` take `--json` for scripts.
@@ -213,18 +216,23 @@ flags, else `BEEVM_API_KEY` and `BEEVM_URL`, else what `beevm login` saved
 | `beevmd invoke --code <path> --payload J` | run a function in one VM, without a server |
 | `beevmd bench coldstart [--runs 100] [--mode boot,restore,function,warm]` | measure cold starts |
 | `beevmd bench load --fn a,b --rate 20 --duration 1m` | send steady load to a running server |
+| `beevmd bench density --fn a,b --step 20 --max 1000` | start idle VMs in steps until memory runs low; PSS / RSS / host memory per VM |
+| `make bench` | whole M12 run: cold start per runtime, k6 throughput, density (1 function, 8 functions), charts and `report.md` in `bench/results/m12/<time>/`. `BENCH_QUICK=1` for a 5-minute smoke run. One-time `make bench-setup` installs k6 and matplotlib (sudo). `make bench-jailer` (sudo) adds density with isolation; `make bench-report DIR=...` re-plots |
 
 Every route except `/healthz` and `/metrics` needs `Authorization: Bearer <key>`.
 
 | Route | Purpose |
 |---|---|
 | `POST /invoke/{name}` | call a function; the body is the payload |
+| `POST /invoke/{name}?async=1` | queue the call (or header `X-BeeVM-Invocation-Type: Event`): `202 {"request_id","queued"}`, `429` when the queue is full; the result arrives as an `invoke` event with that `request_id` |
 | `PUT /api/v1/functions/{name}` | deploy (multipart upload) |
 | `GET /api/v1/functions`, `GET` or `DELETE /api/v1/functions/{name}` | list, show, remove |
 | `POST /api/v1/functions/{name}/prewarm?count=N` | start idle VMs |
+| `POST /api/v1/functions/{name}/cool[?count=N]`, `POST /api/v1/vms/cool` | throw away one function's warm VMs (all, or N) or all of yours (`{"cooled":n}`); calls in progress finish first |
 | `GET /api/v1/vms` | your VMs |
 | `GET /api/v1/node` | node density: VMs per state, memory |
 | `GET /api/v1/events` | live event stream (Server-Sent Events) |
+| `GET /api/v1/snapshots`, `DELETE /api/v1/snapshots/{key}` | the node's runtime snapshots and your own function snapshots; delete one (runtime snapshots only with `serve --allow-runtime-snapshot-delete`) |
 | `GET /healthz`, `GET /metrics` | health check, Prometheus metrics |
 
 An invoke answers 200 with the function's output, and headers that say how it was served:
@@ -243,6 +251,11 @@ or replaces its own idle VMs, so other tenants keep their warm VMs.
 When `serve` starts, every deployed function whose snapshot is missing (for example after
 `make images`) gets it rebuilt in the background, so its first call is fast again.
 
+A tenant may delete its own function snapshots (the next cold start imports the code again and
+rebuilds it). Runtime snapshots are shared by every tenant, so deleting one through the API or
+the dashboard needs `serve --allow-runtime-snapshot-delete`; the next cold start of that runtime
+then waits 2-3 s for the rebuild. Without the flag the operator uses `beevmd snapshot rm`.
+
 ## Optional parts
 
 None of these is needed for the quick start, and the dashboard and monitoring can be deleted
@@ -252,7 +265,7 @@ without touching the core.
 |---|---|
 | **Tenant isolation** | `sudo ./bin/beevmd serve --isolation jailer` puts every VM in a jailer chroot under its own user, with cgroup limits and its own network namespace. `make test-isolation` runs six attacks against it. |
 | **Code in a bucket** | `make minio` runs a local S3 server; then `set -a; . deploy/minio.env; set +a` before `beevmd serve`. Without a bucket, code stays on local disk. |
-| **Web dashboard** | `make ui`, then open http://127.0.0.1:8080/ui/ and paste your API key. Besides the live view you can deploy functions there (drop a file, a zip, a folder or a binary), call them, prewarm and delete them. |
+| **Web dashboard** | `make ui`, then open http://127.0.0.1:8080/ui/ and paste your API key. Besides the live view you can deploy functions there (drop a file, a zip, a folder or a binary), call them, prewarm, cool (drop warm VMs) and delete them, and delete runtime and function snapshots. |
 | **Prometheus and Grafana** | `make monitoring`, then open http://localhost:3000 (dashboard "BeeVM"). |
 
 ## Tests

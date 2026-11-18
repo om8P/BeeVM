@@ -1,0 +1,19 @@
+2026-11-17 09:24:23 $ ./bin/beevmd doctor
+ok    kvm           /dev/kvm usable
+ok    home          /home/ommhatre/.beevm
+ok    firecracker   Firecracker v1.17.0
+ok    kernel        vmlinux (42 MiB)
+ok    image binary  rootfs.ext4 (64 MiB)
+ok    image python  rootfs-python.ext4 (128 MiB)
+ok    image node    rootfs-node.ext4 (160 MiB)
+ok    disk          933.0 GiB free
+info  server        not running on 127.0.0.1:8080
+                    -> ./bin/beevmd serve
+ok    snapshots     runtime: binary, python, node; function snapshots: 15
+ok    tenants       2
+ok    leftover VMs  none
+ok    dashboard     built (web/dist)
+ok    bench tools   k6 and matplotlib installed
+ok    power         plugged in (still use a performance power mode for benchmarks)
+
+ready

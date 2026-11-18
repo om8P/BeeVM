@@ -30,18 +30,35 @@ import (
 // Deps are the things the server needs. MaxUploadBytes and MaxPayloadBytes default to the
 // limits the guest agent enforces.
 type Deps struct {
-	Registry        *registry.Registry
-	Code            *codestore.Store
-	Runner          runner.Runner
-	Logger          *slog.Logger
-	Metrics         *metrics.Metrics // optional: nil = no /metrics and nothing recorded
-	Events          *events.Hub      // optional: nil = no /api/v1/events stream
-	MaxUploadBytes  int64
-	MaxPayloadBytes int64
+	Registry *registry.Registry
+	Code     *codestore.Store
+	Runner   runner.Runner
+	Logger   *slog.Logger
+	Metrics  *metrics.Metrics // optional: nil = no /metrics and nothing recorded
+	Events   *events.Hub      // optional: nil = no /api/v1/events stream
+	// Snapshots (optional) lets tenants list snapshots and delete their own function
+	// snapshots; nil = the snapshot routes answer 501. AllowRuntimeSnapshotDelete also lets
+	// them delete runtime snapshots, which every tenant shares.
+	Snapshots                  SnapshotStore
+	AllowRuntimeSnapshotDelete bool
+	MaxUploadBytes             int64
+	MaxPayloadBytes            int64
+
+	// Async invoke (async.go). AsyncQueueSize: calls the queue holds, all tenants (0 = default
+	// 1000, < 0 = async invoke off: 501). AsyncPerTenant: one tenant's share (0 = default 250).
+	// AsyncWorkers: calls run at the same time (0 = the warm pool's VM limit). AsyncMaxAge:
+	// longest wait in the queue (0 = default 5 min).
+	AsyncQueueSize int
+	AsyncPerTenant int
+	AsyncWorkers   int
+	AsyncMaxAge    time.Duration
 }
 
-// Server serves the API.
-type Server struct{ Deps }
+// Server serves the API. Call Close when done (it stops the async workers).
+type Server struct {
+	Deps
+	async *asyncQueue // nil = async invoke off
+}
 
 // New creates a Server.
 func New(d Deps) *Server {
@@ -54,7 +71,7 @@ func New(d Deps) *Server {
 	if d.Logger == nil {
 		d.Logger = slog.Default()
 	}
-	return &Server{d}
+	return &Server{Deps: d, async: newAsyncQueue(d.AsyncQueueSize, d.AsyncPerTenant, d.AsyncWorkers, d.AsyncMaxAge)}
 }
 
 // Handler returns the HTTP handler with all routes.
@@ -80,10 +97,14 @@ func (s *Server) Handler() http.Handler {
 			r.Get("/{name}", s.getFunction)
 			r.Delete("/{name}", s.deleteFunction)
 			r.Post("/{name}/prewarm", s.prewarm)
+			r.Post("/{name}/cool", s.coolFunction)
 		})
 		r.Get("/api/v1/vms", s.listVMs)
+		r.Post("/api/v1/vms/cool", s.coolAll)
 		r.Get("/api/v1/node", s.nodeInfo)
 		r.Get("/api/v1/me", s.me)
+		r.Get("/api/v1/snapshots", s.listSnapshots)
+		r.Delete("/api/v1/snapshots/{key}", s.deleteSnapshot)
 		if s.Events != nil {
 			r.Get("/api/v1/events", s.streamEvents)
 		}
@@ -114,6 +135,13 @@ type reqInfo struct {
 	function string
 	runtime  string
 	result   *runner.Result // set once the runner returned
+
+	enqueued bool // an async invoke request: only queued; the call is counted when it ran
+
+	// a finished async call (async.go)
+	requestID string
+	queued    time.Duration
+	failure   string // why it failed: the function's error, expired, ...
 }
 
 func tenantFrom(ctx context.Context) registry.Tenant {
@@ -182,7 +210,7 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 				"function_ms", res.FunctionMS)
 		}
 		s.Logger.Info("request", attrs...)
-		if info.function != "" {
+		if info.function != "" && !info.enqueued {
 			s.observeInvoke(info, status, took)
 			s.publishInvoke(info, status, took)
 		}

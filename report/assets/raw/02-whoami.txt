@@ -1,0 +1,2 @@
+2026-11-17 09:24:25 $ ./bin/beevm whoami
+tenant demo on http://127.0.0.1:8080 (key from BEEVM_API_KEY)

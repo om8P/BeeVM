@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"debug/elf"
 	"errors"
 	"fmt"
@@ -170,13 +171,17 @@ func newDeploy(s *settings) *cobra.Command {
 
 func newInvoke(s *settings) *cobra.Command {
 	var payload, payloadFile string
-	var verbose, logs bool
+	var verbose, logs, async bool
+	var count int
 	cmd := &cobra.Command{
 		Use:   "invoke <name>",
 		Short: "Run a function and print its JSON output",
 		Long: "The payload comes from --payload, or --payload-file, or standard input when something is piped in;\n" +
 			"otherwise the function gets no input (null). With -l, the end of the function's log (what it\n" +
-			"printed) goes to stderr; with -v, the log and the timings do. A failed call always shows its log.",
+			"printed) goes to stderr; with -v, the log and the timings do. A failed call always shows its log.\n\n" +
+			"With --async the call is queued on the server and the command returns at once with a request id\n" +
+			"(like Lambda's \"Event\" invocation); -n N queues N calls. The results are not printed: see the\n" +
+			"dashboard, the server log (\"async invoke\" lines) or GET /api/v1/events.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			body, err := readPayload(payload, payloadFile)
@@ -186,6 +191,12 @@ func newInvoke(s *settings) *cobra.Command {
 			c, err := s.client()
 			if err != nil {
 				return err
+			}
+			if async {
+				return invokeAsync(cmd.Context(), c, args[0], body, count)
+			}
+			if count != 1 {
+				return &exitError{2, "-n works only with --async"}
 			}
 			start := time.Now()
 			res, err := c.InvokeWith(cmd.Context(), args[0], body, apiclient.InvokeOptions{Logs: logs || verbose})
@@ -230,7 +241,27 @@ func newInvoke(s *settings) *cobra.Command {
 	cmd.Flags().StringVar(&payloadFile, "payload-file", "", "read the JSON payload from this file")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "print the function's log and the timings to stderr")
 	cmd.Flags().BoolVarP(&logs, "logs", "l", false, "print the end of the function's log to stderr")
+	cmd.Flags().BoolVar(&async, "async", false, "queue the call on the server and return at once (result: dashboard, server log or event stream)")
+	cmd.Flags().IntVarP(&count, "count", "n", 1, "with --async: how many calls to queue")
 	return cmd
+}
+
+// invokeAsync queues n calls and prints their request ids.
+func invokeAsync(ctx context.Context, c *apiclient.Client, name string, body []byte, n int) error {
+	if n < 1 {
+		return &exitError{2, "-n must be at least 1"}
+	}
+	for i := 0; i < n; i++ {
+		a, err := c.InvokeAsync(ctx, name, body)
+		if err != nil {
+			if i > 0 {
+				fmt.Fprintf(os.Stderr, "queued %d of %d calls\n", i, n)
+			}
+			return err
+		}
+		fmt.Printf("queued %s (%d of yours waiting)\n", a.RequestID, a.Queued)
+	}
+	return nil
 }
 
 // printLog writes a successful call's log under a "function log:" title. total is the whole

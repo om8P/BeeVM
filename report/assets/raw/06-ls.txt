@@ -1,0 +1,6 @@
+2026-11-17 09:24:26 $ ./bin/beevm ls
+NAME          RUNTIME  SIZE    MEMORY   VCPUS  TIMEOUT  UPDATED
+hello         binary   2.5 MB  128 MiB  1      10s      2026-11-17 09:24:25
+hello-node    node     548 B   128 MiB  1      10s      2026-11-17 09:24:26
+hello-python  python   523 B   128 MiB  1      10s      2026-11-17 09:24:26
+matrix        binary   2.5 MB  128 MiB  1      10s      2026-11-07 10:16:45

@@ -190,6 +190,15 @@ func (c *Client) VMs(ctx context.Context) ([]apitypes.VM, error) {
 	return l.VMs, err
 }
 
+// Node returns how full the node is (VMs per state, memory). It covers every tenant.
+func (c *Client) Node(ctx context.Context) (apitypes.Node, error) {
+	resp, err := c.do(ctx, http.MethodGet, "/api/v1/node", nil, "")
+	if err != nil {
+		return apitypes.Node{}, err
+	}
+	return decodeBody[apitypes.Node](resp)
+}
+
 // InvokeResult is a successful call.
 type InvokeResult struct {
 	Output     json.RawMessage
@@ -218,6 +227,21 @@ type InvokeOptions struct {
 // that fails comes back as *APIError with Status 502, ExitCode and Stderr set.
 func (c *Client) Invoke(ctx context.Context, name string, payload []byte) (InvokeResult, error) {
 	return c.InvokeWith(ctx, name, payload, InvokeOptions{})
+}
+
+// InvokeAsync queues a call on the server (POST /invoke/{name}?async=1, like Lambda's "Event"
+// invocation) and returns at once. The result is not returned: it appears as an "invoke" event
+// with the same request id on GET /api/v1/events, in the server log and in the metrics. A full
+// queue is an *APIError with Status 429.
+func (c *Client) InvokeAsync(ctx context.Context, name string, payload []byte) (apitypes.InvokeAccepted, error) {
+	var out apitypes.InvokeAccepted
+	resp, err := c.doHeaders(ctx, http.MethodPost, "/invoke/"+url.PathEscape(name)+"?async=1", strings.NewReader(string(payload)), "application/json", nil)
+	if err != nil {
+		return out, err
+	}
+	defer resp.Body.Close()
+	err = json.NewDecoder(resp.Body).Decode(&out)
+	return out, err
 }
 
 // InvokeWith is Invoke with options.

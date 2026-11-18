@@ -18,6 +18,7 @@ import { VmGrid } from './components/VmGrid'
 import { InvokePanel } from './components/InvokePanel'
 import { DeployPanel } from './components/DeployPanel'
 import { PoolTable } from './components/PoolTable'
+import { SnapshotPanel } from './components/SnapshotPanel'
 
 // The chart library (Recharts) is most of the JavaScript. Loading the chart lazily puts it in a
 // separate file that the browser fetches after the rest of the page is already working.
@@ -155,7 +156,7 @@ function Dashboard({ apiKey, onSignOut }: { apiKey: string; onSignOut: (reason?:
       <div className="row row-main">
         <VmGrid vms={vms} functions={functions} node={node} maxVMs={live.maxVMs} pulse={pulse} now={now} />
         <div className="stack">
-          <InvokePanel client={client} functions={functions} onError={onError} pick={pick} />
+          <InvokePanel client={client} functions={functions} onError={onError} pick={pick} events={live.calls} />
           <DeployPanel client={client} functions={functions} onError={onError} onTest={testFunction} />
         </div>
       </div>
@@ -173,6 +174,8 @@ function Dashboard({ apiKey, onSignOut }: { apiKey: string; onSignOut: (reason?:
         </Suspense>
         <PoolTable vms={vms} functions={functions} calls={live.calls} client={client} onError={onError} />
       </div>
+
+      <SnapshotPanel client={client} now={now} onError={onError} />
 
       <footer className="muted foot">
         Uses only the public API: <code>/api/v1/events</code> (live), <code>/api/v1/vms</code>,{' '}

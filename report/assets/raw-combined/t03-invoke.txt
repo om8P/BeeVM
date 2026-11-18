@@ -1,0 +1,27 @@
+2026-11-17 09:24:26 $ ./bin/beevm invoke hello-python --payload {"name":"Om"} -v
+function log:
+hello-python: greeting Om
+{"greeting":"Hello, Om!","runtime":"python"}
+vm ab75edfc: restore (runtime snapshot) 161 ms, upload 15 ms, load 92 ms, function 3 ms, server total 298 ms, round trip 304 ms
+code cache: hit, fetch 0 ms
+
+2026-11-17 09:24:27 $ ./bin/beevm invoke hello-python --payload {"name":"Aditya"} -v
+function log:
+hello-python: greeting Aditya
+{"greeting":"Hello, Aditya!","runtime":"python"}
+vm ab75edfc: warm, function 0 ms, server total 2 ms, round trip 7 ms
+code cache: hit, fetch 0 ms
+
+2026-11-17 09:24:27 $ ./bin/beevm invoke hello-node --payload {"name":"ACC"} -v
+function log:
+hello-node: greeting ACC
+{"greeting":"Hello, ACC!","runtime":"node"}
+vm 3d6b6585: restore (runtime snapshot) 170 ms, upload 13 ms, load 375 ms, function 12 ms, server total 598 ms, round trip 601 ms
+code cache: hit, fetch 0 ms
+
+2026-11-17 09:24:27 $ ./bin/beevm invoke hello --payload {"name":"BeeVM"} -v
+function log:
+hello-go-binary: greeting BeeVM
+{"greeting":"Hello, BeeVM!","runtime":"binary"}
+vm 5f484d8b: restore (function snapshot) 72 ms, upload 0 ms, load 0 ms, function 38 ms, server total 119 ms, round trip 123 ms
+code cache: hit, fetch 0 ms

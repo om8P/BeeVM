@@ -70,7 +70,7 @@ Project lives in `C:\Users\ommga\Desktop\ACC\BeeVM\` ; code runs inside WSL2 Ubu
 | 14 | **CLI** `beevm` | `deploy`, `invoke` (`-l` shows the function's log), `get`, `ls`, `rm`, `prewarm`, `vms`, `login`/`logout`/`whoami` (key saved in `~/.config/beevm/config.json`), `init` (starter function); `--json` on the list commands. Operator commands are in `beevmd` (`serve`, `tenant`, `key`, `snapshot`, `bench`, `doctor`) | Go + `spf13/cobra` (`beevm`), `flag` (`beevmd`) |
 | 15 | **Web Dashboard** *(optional module)* | Live VM grid (state colours), pool sizes, invoke button with timing, cold vs warm latency chart, density counter | **React + Vite + TypeScript**, **Recharts**, plain CSS (Tailwind dropped in M11); built to static files in `web/dist`, served by `beevmd --ui-dir` at `/ui/` (no embedding); Node 24 pinned in WSL for the build |
 | 16 | **Grafana stack** *(optional module)* | Pre-built dashboard JSON for latency/density/pool metrics | **Prometheus + Grafana**: pinned release tarballs via `make monitoring` (no Docker, the tested path) or Docker Compose (profile `monitoring`) |
-| 17 | **Benchmarks** | Cold boot vs snapshot restore vs warm hit; throughput; max VMs per node; isolation attack tests | `beevmd bench coldstart` and `beevmd bench load` (built in M6-M10); planned for M12: **k6** for HTTP load, Python + **matplotlib** for charts |
+| 17 | **Benchmarks** | Cold boot vs snapshot restore vs warm hit; throughput; max VMs per node; isolation attack tests | `beevmd bench coldstart` and `beevmd bench load` (built in M6-M10); M12: `beevmd bench density`, **k6** (`bench/k6/`) for HTTP load, Python + **matplotlib** (`bench/plot_results.py`) for charts, `make bench` |
 | 18 | **Infra (cloud run)** | Spin up benchmark node reproducibly | **Terraform** (GCP N2 with nested virt, or AWS `c5.metal`/`i3en.metal`) + cloud-init setup script |
 
 **Swappable dashboards rule:** the web dashboard and Grafana talk to `beevmd` *only* through the public REST/SSE API and `/metrics`. No core code imports either. Deleting `web/` or `deploy/monitoring/` needs no other change (Makefile targets and Compose profiles are separate).
@@ -120,7 +120,8 @@ examples/functions/    hello-python, hello-node, hello-go-binary, testfn, matrix
 web/                   (optional) React dashboard
 deploy/monitoring/     (optional) prometheus.yml, grafana dashboards
 deploy/docker-compose.yml   MinIO (+ monitoring profile; untested, the tested path needs no Docker)
-bench/results/         benchmark output (git-ignored); k6 scripts and plot_results.py planned for M12
+bench/k6/, bench/plot_results.py   k6 scripts, charts + report (M12); `make bench`
+bench/results/         benchmark output (git-ignored)
 scripts/               setup-wsl.sh, demo.sh (make demo), minio.sh, monitoring.sh, ui.sh, test-isolation.sh
 docs/                  architecture.md, milestones.md, progress.md
 developer-guide/       guide.md (build guide), demo.md (demo script)

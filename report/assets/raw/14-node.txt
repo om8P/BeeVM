@@ -1,0 +1,17 @@
+2026-11-17 09:24:28 $ bash -c curl -s -H "Authorization: Bearer $BEEVM_API_KEY" 127.0.0.1:8080/api/v1/node | python3 -m json.tool
+{
+    "max_vms": 16,
+    "vms": 6,
+    "tenant_vms": 6,
+    "states": {
+        "busy": 0,
+        "idle": 6,
+        "recycling": 0,
+        "restoring": 0
+    },
+    "measured_vms": 6,
+    "pss_bytes": 113314816,
+    "rss_bytes": 178499584,
+    "mem_total_bytes": 8183283712,
+    "mem_available_bytes": 6207152128
+}

@@ -1,0 +1,2 @@
+2026-11-17 09:24:26 $ ./bin/beevm deploy hello-node examples/functions/hello-node
+created hello-node (node index.handler): 548 B, 128 MiB, 1 vCPU, timeout 10s

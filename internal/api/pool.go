@@ -83,6 +83,74 @@ func (s *Server) prewarm(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, apitypes.PrewarmResult{Requested: count, Started: started})
 }
 
+// coolFunction throws away one function's warm VMs, so its next call is a cold start again
+// (restored from a snapshot) without waiting for the keep-alive.
+//
+//	POST /api/v1/functions/{name}/cool[?count=N]   (no count: all of them)
+//	200 {"cooled":n}    400 bad count    404 no such function
+//	501 this server runs without a warm pool
+//
+// With a count, idle VMs go first (least recently used first), then busy ones.
+func (s *Server) coolFunction(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.Runner.(runner.Cooler)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "this server runs without a warm pool: every call is already cold")
+		return
+	}
+	limit := 64
+	if m, ok := s.Runner.(interface{ MaxVMs() int }); ok {
+		limit = m.MaxVMs()
+	}
+	count := 0 // all
+	if q := r.URL.Query().Get("count"); q != "" {
+		n, err := strconv.Atoi(q)
+		if err != nil || n < 1 || n > limit {
+			writeError(w, http.StatusBadRequest, "count must be between 1 and "+strconv.Itoa(limit))
+			return
+		}
+		count = n
+	}
+	tenant := tenantFrom(r.Context())
+	f, err := s.Registry.GetFunction(tenant.ID, chi.URLParam(r, "name"))
+	if errors.Is(err, registry.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "function not found")
+		return
+	}
+	if err != nil {
+		s.Logger.Error("get function", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	n := c.Cool(f.ID, count)
+	s.Logger.Info("cooled", "tenant", tenant.Name, "function", f.Name, "vms", n, "asked", count)
+	writeJSON(w, http.StatusOK, apitypes.CoolResult{Cooled: n})
+}
+
+// coolAll does coolFunction for every function of the caller (never another tenant's).
+//
+//	POST /api/v1/vms/cool
+//	200 {"cooled":n}    501 this server runs without a warm pool
+func (s *Server) coolAll(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.Runner.(runner.Cooler)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "this server runs without a warm pool: every call is already cold")
+		return
+	}
+	tenant := tenantFrom(r.Context())
+	fns, err := s.Registry.ListFunctions(tenant.ID)
+	if err != nil {
+		s.Logger.Error("list functions", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	n := 0
+	for _, f := range fns {
+		n += c.Cool(f.ID, 0)
+	}
+	s.Logger.Info("cooled", "tenant", tenant.Name, "functions", len(fns), "vms", n)
+	writeJSON(w, http.StatusOK, apitypes.CoolResult{Cooled: n})
+}
+
 // listVMs shows the caller's VMs (never another tenant's). Without a warm pool there are none
 // between calls, so the list is empty.
 func (s *Server) listVMs(w http.ResponseWriter, r *http.Request) {

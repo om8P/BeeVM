@@ -593,3 +593,137 @@ func TestRecycleReasonQuota(t *testing.T) {
 		t.Error("tenant-limit evictions need their own label")
 	}
 }
+
+// Cool: idle VMs go now, a busy one finishes its call and then goes, a VM created for a call
+// still serves it; nothing is reused afterwards, and other functions are untouched.
+func TestCool(t *testing.T) {
+	p, _ := newTestPool(4)
+	f := &factory{}
+	ctx := context.Background()
+	idle, _ := p.Acquire(ctx, keyA, f.create)
+	busy, _ := p.Acquire(ctx, keyA, f.create)
+	other, _ := p.Acquire(ctx, keyB, f.create)
+	p.Release(idle, true)
+	p.Release(other, true)
+
+	if n := p.Cool(keyA.FunctionID, 0); n != 2 {
+		t.Errorf("cooled %d VMs, want 2 (one idle, one busy)", n)
+	}
+	if n := p.Cool(keyA.FunctionID, 0); n != 0 {
+		t.Errorf("cooling again counted %d", n)
+	}
+	waitFor(t, "idle VM of A destroyed", func() bool { return states(p)[Idle] == 1 })
+	p.Release(busy, true) // its call went fine; cooled, so not kept
+	waitFor(t, "busy VM destroyed after its call", func() bool { return len(p.Stats(0)) == 1 })
+	if got := p.Stats(0)[0].FunctionID; got != keyB.FunctionID {
+		t.Errorf("cooled the wrong function: %d left", got)
+	}
+	l, err := p.Acquire(ctx, keyA, f.create)
+	if err != nil || l.Warm {
+		t.Fatalf("after cooling the next call must be cold: %+v %v", l, err)
+	}
+	p.Release(l, true)
+	if l2, _ := p.Acquire(ctx, keyA, f.create); !l2.Warm {
+		t.Error("a VM made after cooling is warm again")
+	} else {
+		p.Release(l2, true)
+	}
+}
+
+// A VM being created for a call when its function is cooled still serves that call (unlike
+// Drain, where the code changed); a prewarm being created is dropped.
+func TestCoolWhileCreating(t *testing.T) {
+	p, _ := newTestPool(2)
+	slow := &factory{block: make(chan struct{})}
+	got := make(chan *Lease)
+	go func() {
+		l, err := p.Acquire(context.Background(), keyA, slow.create)
+		if err != nil {
+			t.Errorf("the call failed: %v", err)
+		}
+		got <- l
+	}()
+	waitFor(t, "restoring", func() bool { return states(p)[Restoring] == 1 })
+	if n := p.Cool(keyA.FunctionID, 0); n != 1 {
+		t.Errorf("cooled %d", n)
+	}
+	close(slow.block)
+	l := <-got
+	if l == nil {
+		t.Fatal("no VM for the call")
+	}
+	p.Release(l, true)
+	waitFor(t, "thrown away after its call", func() bool { return len(p.Stats(0)) == 0 })
+
+	slow2 := &factory{block: make(chan struct{})}
+	done := make(chan int)
+	go func() { n, _ := p.Prewarm(context.Background(), keyA, 1, slow2.create); done <- n }()
+	waitFor(t, "prewarm restoring", func() bool { return states(p)[Restoring] == 1 })
+	p.Cool(keyA.FunctionID, 0)
+	close(slow2.block)
+	if n := <-done; n != 0 {
+		t.Errorf("a cooled prewarm counted as started (%d)", n)
+	}
+	waitFor(t, "prewarmed VM dropped", func() bool { return len(p.Stats(0)) == 0 })
+	if !slow2.vms[0].destroyed.Load() {
+		t.Error("the dropped VM was not destroyed")
+	}
+}
+
+func TestRecycleReasonCooled(t *testing.T) {
+	if RecycleReason("cooled on request") != ReasonCooled {
+		t.Error("cooled VMs need their own label")
+	}
+}
+
+// Cool with a count: idle VMs first, least recently used first; busy ones only after every
+// idle one; never more than asked.
+func TestCoolCount(t *testing.T) {
+	p, c := newTestPool(5)
+	f := &factory{}
+	ctx := context.Background()
+	var leases []*Lease
+	for i := 0; i < 4; i++ { // vm-1 .. vm-4, all of function A
+		l, err := p.Acquire(ctx, keyA, f.create)
+		if err != nil {
+			t.Fatal(err)
+		}
+		leases = append(leases, l)
+	}
+	for i := 0; i < 3; i++ { // vm-1, vm-2, vm-3 become idle, used in that order; vm-4 stays busy
+		c.Add(time.Second)
+		p.Release(leases[i], true)
+	}
+	if n := p.Cool(keyA.FunctionID, 2); n != 2 {
+		t.Fatalf("cooled %d, want 2", n)
+	}
+	// Recycled VMs are destroyed in the background: wait for two destructions.
+	destroyed := func() []bool {
+		out := make([]bool, len(f.vms))
+		for i, v := range f.vms {
+			out[i] = v.destroyed.Load()
+		}
+		return out
+	}
+	waitFor(t, "two VMs destroyed", func() bool {
+		n := 0
+		for _, d := range destroyed() {
+			if d {
+				n++
+			}
+		}
+		return n == 2
+	})
+	if d := destroyed(); !d[0] || !d[1] || d[2] || d[3] {
+		t.Errorf("destroyed %v: should cool the two least recently used idle VMs (vm-1, vm-2) and keep vm-3 and the busy vm-4", d)
+	}
+	if n := p.Cool(keyA.FunctionID, 5); n != 2 {
+		t.Errorf("then the last idle and the busy one: %d", n)
+	}
+	waitFor(t, "last idle VM gone", func() bool { return states(p)[Idle] == 0 })
+	if states(p)[Busy] != 1 {
+		t.Error("the busy VM must finish its call")
+	}
+	p.Release(leases[3], true)
+	waitFor(t, "busy VM gone after its call", func() bool { return len(p.Stats(0)) == 0 })
+}

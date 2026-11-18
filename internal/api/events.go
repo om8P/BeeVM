@@ -41,6 +41,10 @@ func (s *Server) publishInvoke(info *reqInfo, status int, d time.Duration) {
 		ev.Start, ev.Snapshot = res.StartKind, res.Snapshot
 		ev.BootMS, ev.UploadMS, ev.LoadMS, ev.FunctionMS = res.BootMS, res.UploadMS, res.LoadMS, res.FunctionMS
 	}
+	if info.requestID != "" {
+		ev.RequestID, ev.Async, ev.Error = info.requestID, true, info.failure
+		ev.QueuedMS = float64(info.queued.Microseconds()) / 1000
+	}
 	s.Events.Publish(events.Event{Type: events.TypeInvoke, TenantID: info.tenantID, Data: ev})
 }
 

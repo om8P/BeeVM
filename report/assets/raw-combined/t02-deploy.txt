@@ -1,0 +1,18 @@
+2026-11-17 09:24:25 $ ./bin/beevm whoami
+tenant demo on http://127.0.0.1:8080 (key from BEEVM_API_KEY)
+
+2026-11-17 09:24:25 $ ./bin/beevm deploy hello bin/functions/hello-go-binary
+updated hello (binary): 2.5 MB, 128 MiB, 1 vCPU, timeout 10s
+
+2026-11-17 09:24:25 $ ./bin/beevm deploy hello-python examples/functions/hello-python
+created hello-python (python handler.handler): 523 B, 128 MiB, 1 vCPU, timeout 10s
+
+2026-11-17 09:24:26 $ ./bin/beevm deploy hello-node examples/functions/hello-node
+created hello-node (node index.handler): 548 B, 128 MiB, 1 vCPU, timeout 10s
+
+2026-11-17 09:24:26 $ ./bin/beevm ls
+NAME          RUNTIME  SIZE    MEMORY   VCPUS  TIMEOUT  UPDATED
+hello         binary   2.5 MB  128 MiB  1      10s      2026-11-17 09:24:25
+hello-node    node     548 B   128 MiB  1      10s      2026-11-17 09:24:26
+hello-python  python   523 B   128 MiB  1      10s      2026-11-17 09:24:26
+matrix        binary   2.5 MB  128 MiB  1      10s      2026-11-07 10:16:45

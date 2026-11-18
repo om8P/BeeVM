@@ -192,3 +192,22 @@ func TestCheckLeftoversAndPower(t *testing.T) {
 		t.Errorf("plugged in: %+v", c)
 	}
 }
+
+func TestCheckBenchTools(t *testing.T) {
+	cases := []struct {
+		k6, mpl bool
+		level   string
+		fix     string
+	}{
+		{true, true, levelOK, ""},
+		{false, true, levelInfo, "make bench-setup"},
+		{true, false, levelInfo, "make bench-setup"},
+		{false, false, levelInfo, "make bench-setup"},
+	}
+	for _, c := range cases {
+		got := checkBenchTools(c.k6, c.mpl)
+		if got.Level != c.level || got.Fix != c.fix {
+			t.Errorf("k6=%v matplotlib=%v: got %+v", c.k6, c.mpl, got)
+		}
+	}
+}

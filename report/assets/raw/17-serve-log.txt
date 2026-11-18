@@ -1,0 +1,40 @@
+time=2026-11-17T09:27:54.175Z level=INFO msg=request method=POST path=/invoke/hello-node request_id=LOQ69/pY9q6dCKcF-003093 tenant=demo status=200 duration_ms=2 vm=027974b3 function=hello-node runtime=node code_cache=hit fetch_ms=0 start=warm boot_ms=0 upload_ms=0 load_ms=0 function_ms=0
+time=2026-11-17T09:27:54.245Z level=INFO msg=request method=POST path=/invoke/hello request_id=LOQ69/pY9q6dCKcF-003094 tenant=demo status=200 duration_ms=4 vm=ad562839 function=hello runtime=binary code_cache=hit fetch_ms=0 start=warm boot_ms=0 upload_ms=0 load_ms=0 function_ms=2
+time=2026-11-17T09:27:54.289Z level=INFO msg=request method=GET path=/metrics request_id=LOQ69/pY9q6dCKcF-003095 tenant="" status=200 duration_ms=2 vm=""
+time=2026-11-17T09:27:54.310Z level=INFO msg=request method=POST path=/invoke/hello-python request_id=LOQ69/pY9q6dCKcF-003096 tenant=demo status=200 duration_ms=1 vm=6ed60ca6 function=hello-python runtime=python code_cache=hit fetch_ms=0 start=warm boot_ms=0 upload_ms=0 load_ms=0 function_ms=0
+time=2026-11-17T09:27:54.375Z level=INFO msg=request method=POST path=/invoke/hello-node request_id=LOQ69/pY9q6dCKcF-003097 tenant=demo status=200 duration_ms=2 vm=027974b3 function=hello-node runtime=node code_cache=hit fetch_ms=0 start=warm boot_ms=0 upload_ms=0 load_ms=0 function_ms=0
+time=2026-11-17T09:27:54.447Z level=INFO msg=request method=POST path=/invoke/hello request_id=LOQ69/pY9q6dCKcF-003098 tenant=demo status=200 duration_ms=4 vm=ad562839 function=hello runtime=binary code_cache=hit fetch_ms=0 start=warm boot_ms=0 upload_ms=0 load_ms=0 function_ms=2
+time=2026-11-17T09:27:54.514Z level=INFO msg=request method=POST path=/invoke/hello-python request_id=LOQ69/pY9q6dCKcF-003099 tenant=demo status=200 duration_ms=3 vm=6ed60ca6 function=hello-python runtime=python code_cache=hit fetch_ms=0 start=warm boot_ms=0 upload_ms=0 load_ms=0 function_ms=0
+time=2026-11-17T09:27:54.575Z level=INFO msg=request method=POST path=/invoke/hello-node request_id=LOQ69/pY9q6dCKcF-003100 tenant=demo status=200 duration_ms=2 vm=027974b3 function=hello-node runtime=node code_cache=hit fetch_ms=0 start=warm boot_ms=0 upload_ms=0 load_ms=0 function_ms=0
+time=2026-11-17T09:27:54.649Z level=INFO msg=request method=POST path=/invoke/hello request_id=LOQ69/pY9q6dCKcF-003101 tenant=demo status=200 duration_ms=4 vm=ad562839 function=hello runtime=binary code_cache=hit fetch_ms=0 start=warm boot_ms=0 upload_ms=0 load_ms=0 function_ms=2
+time=2026-11-17T09:27:54.709Z level=INFO msg=request method=POST path=/invoke/hello-python request_id=LOQ69/pY9q6dCKcF-003102 tenant=demo status=200 duration_ms=2 vm=6ed60ca6 function=hello-python runtime=python code_cache=hit fetch_ms=0 start=warm boot_ms=0 upload_ms=0 load_ms=0 function_ms=0
+time=2026-11-17T09:27:54.780Z level=INFO msg=request method=POST path=/invoke/hello-node request_id=LOQ69/pY9q6dCKcF-003103 tenant=demo status=200 duration_ms=2 vm=027974b3 function=hello-node runtime=node code_cache=hit fetch_ms=0 start=warm boot_ms=0 upload_ms=0 load_ms=0 function_ms=0
+time=2026-11-17T09:27:54.844Z level=INFO msg=request method=POST path=/invoke/hello request_id=LOQ69/pY9q6dCKcF-003104 tenant=demo status=200 duration_ms=3 vm=ad562839 function=hello runtime=binary code_cache=hit fetch_ms=0 start=warm boot_ms=0 upload_ms=0 load_ms=0 function_ms=1
+time=2026-11-17T09:27:54.913Z level=INFO msg=request method=POST path=/invoke/hello-python request_id=LOQ69/pY9q6dCKcF-003105 tenant=demo status=200 duration_ms=3 vm=6ed60ca6 function=hello-python runtime=python code_cache=hit fetch_ms=0 start=warm boot_ms=0 upload_ms=0 load_ms=0 function_ms=0
+time=2026-11-17T09:27:54.914Z level=INFO msg=request method=GET path=/api/v1/node request_id=LOQ69/pY9q6dCKcF-003106 tenant=demo status=200 duration_ms=1 vm=""
+time=2026-11-17T09:27:54.981Z level=INFO msg=request method=POST path=/invoke/hello-node request_id=LOQ69/pY9q6dCKcF-003107 tenant=demo status=200 duration_ms=6 vm=027974b3 function=hello-node runtime=node code_cache=hit fetch_ms=0 start=warm boot_ms=0 upload_ms=0 load_ms=0 function_ms=1
+time=2026-11-17T09:27:55.295Z level=INFO msg=request method=GET path=/metrics request_id=LOQ69/pY9q6dCKcF-003108 tenant="" status=200 duration_ms=3 vm=""
+time=2026-11-17T09:27:56.288Z level=INFO msg=request method=GET path=/metrics request_id=LOQ69/pY9q6dCKcF-003109 tenant="" status=200 duration_ms=2 vm=""
+time=2026-11-17T09:27:56.920Z level=INFO msg=request method=GET path=/api/v1/node request_id=LOQ69/pY9q6dCKcF-003110 tenant=demo status=200 duration_ms=2 vm=""
+time=2026-11-17T09:27:57.291Z level=INFO msg=request method=GET path=/metrics request_id=LOQ69/pY9q6dCKcF-003111 tenant="" status=200 duration_ms=2 vm=""
+time=2026-11-17T09:27:58.288Z level=INFO msg=request method=GET path=/metrics request_id=LOQ69/pY9q6dCKcF-003112 tenant="" status=200 duration_ms=2 vm=""
+time=2026-11-17T09:27:59.091Z level=INFO msg=request method=GET path=/api/v1/node request_id=LOQ69/pY9q6dCKcF-003113 tenant=demo status=200 duration_ms=1 vm=""
+time=2026-11-17T09:27:59.290Z level=INFO msg=request method=GET path=/metrics request_id=LOQ69/pY9q6dCKcF-003114 tenant="" status=200 duration_ms=4 vm=""
+time=2026-11-17T09:28:00.287Z level=INFO msg=request method=GET path=/metrics request_id=LOQ69/pY9q6dCKcF-003115 tenant="" status=200 duration_ms=2 vm=""
+time=2026-11-17T09:28:01.268Z level=INFO msg=request method=GET path=/api/v1/node request_id=LOQ69/pY9q6dCKcF-003116 tenant=demo status=200 duration_ms=1 vm=""
+time=2026-11-17T09:28:01.291Z level=INFO msg=request method=GET path=/metrics request_id=LOQ69/pY9q6dCKcF-003117 tenant="" status=200 duration_ms=4 vm=""
+time=2026-11-17T09:28:02.291Z level=INFO msg=request method=GET path=/metrics request_id=LOQ69/pY9q6dCKcF-003118 tenant="" status=200 duration_ms=5 vm=""
+time=2026-11-17T09:28:03.287Z level=INFO msg=request method=GET path=/metrics request_id=LOQ69/pY9q6dCKcF-003119 tenant="" status=200 duration_ms=2 vm=""
+time=2026-11-17T09:28:03.463Z level=INFO msg=request method=GET path=/api/v1/node request_id=LOQ69/pY9q6dCKcF-003120 tenant=demo status=200 duration_ms=2 vm=""
+time=2026-11-17T09:28:04.288Z level=INFO msg=request method=GET path=/metrics request_id=LOQ69/pY9q6dCKcF-003121 tenant="" status=200 duration_ms=2 vm=""
+time=2026-11-17T09:28:05.289Z level=INFO msg=request method=GET path=/metrics request_id=LOQ69/pY9q6dCKcF-003122 tenant="" status=200 duration_ms=1 vm=""
+time=2026-11-17T09:28:05.452Z level=INFO msg="recycling vm" vm=027974b3 function_id=15 reason="keep-alive expired"
+time=2026-11-17T09:28:05.452Z level=INFO msg="recycling vm" vm=ad562839 function_id=1 reason="keep-alive expired"
+time=2026-11-17T09:28:05.453Z level=INFO msg="recycling vm" vm=6ed60ca6 function_id=14 reason="keep-alive expired"
+time=2026-11-17T09:28:05.674Z level=INFO msg=request method=GET path=/api/v1/node request_id=LOQ69/pY9q6dCKcF-003123 tenant=demo status=200 duration_ms=0 vm=""
+time=2026-11-17T09:28:06.287Z level=INFO msg=request method=GET path=/metrics request_id=LOQ69/pY9q6dCKcF-003124 tenant="" status=200 duration_ms=2 vm=""
+time=2026-11-17T09:28:07.288Z level=INFO msg=request method=GET path=/metrics request_id=LOQ69/pY9q6dCKcF-003125 tenant="" status=200 duration_ms=0 vm=""
+time=2026-11-17T09:28:07.866Z level=INFO msg=request method=GET path=/api/v1/node request_id=LOQ69/pY9q6dCKcF-003126 tenant=demo status=200 duration_ms=0 vm=""
+time=2026-11-17T09:28:08.287Z level=INFO msg=request method=GET path=/metrics request_id=LOQ69/pY9q6dCKcF-003127 tenant="" status=200 duration_ms=2 vm=""
+time=2026-11-17T09:28:09.287Z level=INFO msg=request method=GET path=/metrics request_id=LOQ69/pY9q6dCKcF-003128 tenant="" status=200 duration_ms=1 vm=""
+time=2026-11-17T09:28:10.041Z level=INFO msg=request method=GET path=/api/v1/node request_id=LOQ69/pY9q6dCKcF-003129 tenant=demo status=200 duration_ms=0 vm=""

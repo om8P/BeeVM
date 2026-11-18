@@ -1,0 +1,29 @@
+2026-11-17 09:31:43 $ bash -c go test -count=1 ./... 2>&1
+ok  	github.com/om8P/BeeVM/cmd/beevm	0.517s
+?   	github.com/om8P/BeeVM/cmd/beevm-agent	[no test files]
+ok  	github.com/om8P/BeeVM/cmd/beevmd	1.074s
+?   	github.com/om8P/BeeVM/examples/functions/cpuhog	[no test files]
+?   	github.com/om8P/BeeVM/examples/functions/forkbomb	[no test files]
+?   	github.com/om8P/BeeVM/examples/functions/hello-go-binary	[no test files]
+?   	github.com/om8P/BeeVM/examples/functions/hostread	[no test files]
+?   	github.com/om8P/BeeVM/examples/functions/matrix	[no test files]
+?   	github.com/om8P/BeeVM/examples/functions/memhog	[no test files]
+?   	github.com/om8P/BeeVM/examples/functions/netprobe	[no test files]
+?   	github.com/om8P/BeeVM/examples/functions/testfn	[no test files]
+ok  	github.com/om8P/BeeVM/internal/agent	3.018s
+?   	github.com/om8P/BeeVM/internal/agentproto	[no test files]
+ok  	github.com/om8P/BeeVM/internal/api	2.018s
+ok  	github.com/om8P/BeeVM/internal/apiclient	0.936s
+?   	github.com/om8P/BeeVM/internal/apitypes	[no test files]
+ok  	github.com/om8P/BeeVM/internal/codestore	0.059s
+ok  	github.com/om8P/BeeVM/internal/events	0.039s
+ok  	github.com/om8P/BeeVM/internal/isolation	0.052s
+ok  	github.com/om8P/BeeVM/internal/metrics	0.054s
+ok  	github.com/om8P/BeeVM/internal/netns	0.039s
+ok  	github.com/om8P/BeeVM/internal/pkg	0.078s
+ok  	github.com/om8P/BeeVM/internal/pool	0.366s
+ok  	github.com/om8P/BeeVM/internal/registry	0.738s
+ok  	github.com/om8P/BeeVM/internal/runner	0.252s
+ok  	github.com/om8P/BeeVM/internal/snapshot	0.659s
+ok  	github.com/om8P/BeeVM/internal/store	0.054s
+ok  	github.com/om8P/BeeVM/internal/vmm	0.293s

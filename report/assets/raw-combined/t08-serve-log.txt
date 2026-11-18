@@ -1,0 +1,14 @@
+2026-11-17 09:27:55 $ tail -n 14 serve.log   (beevmd serve --log-format text; lines cut at 170 characters)
+time=2026-11-17T09:27:54.175Z level=INFO msg=request method=POST path=/invoke/hello-node request_id=LOQ69/pY9q6dCKcF-003093 tenant=demo status=200 duration_ms=2 vm=027974
+time=2026-11-17T09:27:54.245Z level=INFO msg=request method=POST path=/invoke/hello request_id=LOQ69/pY9q6dCKcF-003094 tenant=demo status=200 duration_ms=4 vm=ad562839 fu
+time=2026-11-17T09:27:54.310Z level=INFO msg=request method=POST path=/invoke/hello-python request_id=LOQ69/pY9q6dCKcF-003096 tenant=demo status=200 duration_ms=1 vm=6ed6
+time=2026-11-17T09:27:54.375Z level=INFO msg=request method=POST path=/invoke/hello-node request_id=LOQ69/pY9q6dCKcF-003097 tenant=demo status=200 duration_ms=2 vm=027974
+time=2026-11-17T09:27:54.447Z level=INFO msg=request method=POST path=/invoke/hello request_id=LOQ69/pY9q6dCKcF-003098 tenant=demo status=200 duration_ms=4 vm=ad562839 fu
+time=2026-11-17T09:27:54.514Z level=INFO msg=request method=POST path=/invoke/hello-python request_id=LOQ69/pY9q6dCKcF-003099 tenant=demo status=200 duration_ms=3 vm=6ed6
+time=2026-11-17T09:27:54.575Z level=INFO msg=request method=POST path=/invoke/hello-node request_id=LOQ69/pY9q6dCKcF-003100 tenant=demo status=200 duration_ms=2 vm=027974
+time=2026-11-17T09:27:54.649Z level=INFO msg=request method=POST path=/invoke/hello request_id=LOQ69/pY9q6dCKcF-003101 tenant=demo status=200 duration_ms=4 vm=ad562839 fu
+time=2026-11-17T09:27:54.709Z level=INFO msg=request method=POST path=/invoke/hello-python request_id=LOQ69/pY9q6dCKcF-003102 tenant=demo status=200 duration_ms=2 vm=6ed6
+time=2026-11-17T09:27:54.780Z level=INFO msg=request method=POST path=/invoke/hello-node request_id=LOQ69/pY9q6dCKcF-003103 tenant=demo status=200 duration_ms=2 vm=027974
+time=2026-11-17T09:27:54.844Z level=INFO msg=request method=POST path=/invoke/hello request_id=LOQ69/pY9q6dCKcF-003104 tenant=demo status=200 duration_ms=3 vm=ad562839 fu
+time=2026-11-17T09:27:54.913Z level=INFO msg=request method=POST path=/invoke/hello-python request_id=LOQ69/pY9q6dCKcF-003105 tenant=demo status=200 duration_ms=3 vm=6ed6
+time=2026-11-17T09:27:54.981Z level=INFO msg=request method=POST path=/invoke/hello-node request_id=LOQ69/pY9q6dCKcF-003107 tenant=demo status=200 duration_ms=6 vm=027974

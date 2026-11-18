@@ -1,0 +1,15 @@
+2026-11-17 09:24:28 $ ./bin/beevmd bench load --fn hello,hello-python,hello-node --rate 20 --duration 20s
+load: hello,hello-python,hello-node at 20.0 calls/s for 20s, at most 8 at once, against http://127.0.0.1:8080 (Ctrl-C stops early)
+    5s  calls 99  ok 99  warm 99  skipped 0  p50 4.0 ms  p99 37.5 ms
+   10s  calls 199  ok 199  warm 199  skipped 0  p50 4.2 ms  p99 17.0 ms
+   15s  calls 299  ok 299  warm 298  skipped 0  p50 3.9 ms  p99 96.8 ms
+   20s  calls 399  ok 399  warm 398  skipped 0  p50 3.6 ms  p99 76.8 ms
+
+    start  calls  p50 ms  p90 ms  p99 ms  max ms
+     warm    399     3.6     8.0    40.6   173.4
+  restore      1   114.4   114.4   114.4   114.4
+      all    400     3.6     8.0    40.6   173.4
+
+status  200: 400
+skipped 0 (all --concurrency slots busy)
+rate    20.0 calls/s over 20.0 s
