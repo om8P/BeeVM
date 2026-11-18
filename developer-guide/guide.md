@@ -2082,6 +2082,16 @@ A **Deploy** panel under Invoke uploads a function the same way `beevm deploy` d
 
 Tests: Vitest `deploy.test.ts`, 20 tests (names, handlers, detection, hand-built Linux program headers: static, dynamic, ARM64, 32-bit, object file; package rules; real zips built and read back; `prepare` for a file, a folder, a zip and a binary); 36 dashboard tests in all. Checked by hand in the browser against a real server: a Python file, a Node.js zip, the 2.5 MB Go example and a folder with a sub-package, each called from its function snapshot (VM ready 44-84 ms); a text file, a bad name, 32 MiB memory and a missing handler file all blocked with a message; replace and delete with their confirmations; no sideways scrolling at 375 px (dark) and 1024 px (light).
 
+### 14.11 Latency chart for long-running functions (2026-11-18)
+
+The chart's y axis used to end at 2 s, and Recharts does not draw dots outside the axis (`allowDataOverflow`), so a function that ran 5 s simply did not appear. Calls under 0.5 ms (warm Python, about 0.4 ms) fell off the bottom the same way. Now:
+
+- **Auto** (default): the top follows the slowest call shown, with 20 % headroom, in steps 2 s, 5 s, 10 s, 30 s, 1 min, 2 min (a call can run up to the 60 s timeout plus its VM start). The axis title says the current top ("up to 30s").
+- **2s / 10s / 1m**: fixed tops to zoom in on the fast calls. Slower calls stay on the chart, drawn on the top edge, with a note ("2 calls took longer than 2s and are drawn on the top edge. Fit all") and "(above the range)" in their tooltip; **Fit all** goes back to Auto.
+- Every dot is kept between 0.5 ms and the top, so nothing disappears silently.
+
+The range logic is in `stats.ts` (`yTop`, `yTicks`, `fmtAxisMs`, tested in `logic.test.ts`). Checked against a real server with `testfn` sleeping 6 s and 12 s: Auto went from 2s to 30s, all dots drawn; 2s showed both slow calls on the top edge with the note.
+
 ---
 
 ## Appendix A: command cheat sheet

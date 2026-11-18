@@ -44,6 +44,40 @@ export function fmtMs(ms: number): string {
   return `${(ms / 1000).toFixed(1)} s`
 }
 
+// ---------------------------------------------------------------- latency chart y axis
+
+/** The latency chart's y range: 'auto' fits the slowest call shown, the others are fixed tops. */
+export type YRange = 'auto' | 2_000 | 10_000 | 60_000
+export const Y_RANGES: { value: YRange; label: string }[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 2_000, label: '2s' },
+  { value: 10_000, label: '10s' },
+  { value: 60_000, label: '1m' },
+]
+/** Steps the automatic top snaps to (ms). A call can run up to 60 s plus VM start and upload. */
+const AUTO_TOPS = [2_000, 5_000, 10_000, 30_000, 60_000, 120_000]
+export const Y_BOTTOM = 0.5
+
+/** yTop is the top of the y axis: the fixed range, or for 'auto' the first step above the
+ * slowest call (with 20 % headroom so its dot is not cut in half), at least 2 s. */
+export function yTop(range: YRange, maxMs: number): number {
+  if (range !== 'auto') return range
+  const want = maxMs * 1.2
+  return AUTO_TOPS.find((t) => t >= want) ?? AUTO_TOPS[AUTO_TOPS.length - 1]
+}
+
+/** yTicks are the log-scale ticks (1-5-10 steps, then whole seconds) that fit under top. */
+export function yTicks(top: number): number[] {
+  return [1, 5, 10, 50, 100, 500, 1_000, 5_000, 10_000, 30_000, 60_000, 120_000].filter((t) => t <= top)
+}
+
+/** fmtAxisMs labels a y tick: 500, 1s, 30s, 1m. */
+export function fmtAxisMs(v: number): string {
+  if (v >= 60_000) return `${v / 60_000}m`
+  if (v >= 1_000) return `${v / 1_000}s`
+  return `${v}`
+}
+
 export function fmtBytes(b: number): string {
   if (!Number.isFinite(b) || b <= 0) return '–'
   const mib = b / (1 << 20)

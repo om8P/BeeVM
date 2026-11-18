@@ -2,7 +2,28 @@ import { describe, expect, it } from 'vitest'
 import { errorText, parseTiming, type InvokeEvent, type VM } from './api'
 import type { Fn } from './api'
 import { applyFunctionEvent, callsPerSecond, initialState, MAX_CALLS, pools, prunePulse, reduce } from './state'
-import { fmtBytes, fmtMs, percentile, summarize } from './stats'
+import { fmtAxisMs, fmtBytes, fmtMs, percentile, summarize, yTicks, yTop } from './stats'
+
+describe('latency chart y range', () => {
+  it('Auto fits the slowest call, at least 2 s', () => {
+    expect(yTop('auto', 0)).toBe(2_000)
+    expect(yTop('auto', 90)).toBe(2_000)
+    expect(yTop('auto', 1_700)).toBe(5_000) // 2 s would cut the dot: 20 % headroom
+    expect(yTop('auto', 7_500)).toBe(10_000)
+    expect(yTop('auto', 45_000)).toBe(60_000)
+    expect(yTop('auto', 61_000)).toBe(120_000) // a 60 s timeout plus VM start
+    expect(yTop('auto', 10 * 60_000)).toBe(120_000)
+  })
+  it('a fixed range ignores the data', () => {
+    expect(yTop(2_000, 30_000)).toBe(2_000)
+    expect(yTop(60_000, 3)).toBe(60_000)
+  })
+  it('ticks and labels fit the range', () => {
+    expect(yTicks(2_000)).toEqual([1, 5, 10, 50, 100, 500, 1_000])
+    expect(yTicks(60_000).slice(-3)).toEqual([10_000, 30_000, 60_000])
+    expect([500, 1_000, 30_000, 60_000, 120_000].map(fmtAxisMs)).toEqual(['500', '1s', '30s', '1m', '2m'])
+  })
+})
 
 const vm = (id: string, state: VM['state'], fn = 'hello', extra: Partial<VM> = {}): VM => ({
   id, function: fn, state, since: '2026-11-06T12:00:00Z', last_used: '2026-11-06T12:00:00Z', calls: 0, ...extra,

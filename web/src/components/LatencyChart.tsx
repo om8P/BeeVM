@@ -12,7 +12,7 @@ import {
 } from 'recharts'
 import type { Fn } from '../api'
 import type { Call } from '../state'
-import { fmtMs, summarize } from '../stats'
+import { fmtAxisMs, fmtMs, summarize, yTicks, yTop, Y_BOTTOM, Y_RANGES, type YRange } from '../stats'
 
 // The three start kinds, in the fixed order (and colours) used everywhere on the page.
 const KINDS = [
@@ -24,15 +24,19 @@ const WINDOWS = [60, 120, 300]
 
 interface Point {
   x: number // seconds before now (negative)
-  y: number // server time in ms (at least 0.1, for the log scale)
+  y: number // where the dot is drawn: server time in ms, kept inside the y range
+  clipped: boolean // the real time is above the range; the dot sits on the top edge
   call: Call
 }
 
 // LatencyChart: every call of the last minutes as a dot, by how its VM started. The y axis is
-// logarithmic so a 1 ms warm call and a 1 s boot both stay readable.
+// logarithmic so a 1 ms warm call and a 1 s boot both stay readable. Its top follows the
+// slowest call shown (Auto) or a fixed range the user picks; a long-running function (up to
+// the 60 s timeout) never falls off the chart unnoticed.
 export function LatencyChart({ calls, functions, now }: { calls: Call[]; functions: Fn[]; now: number }) {
   const [win, setWin] = useState(120)
   const [fn, setFn] = useState('') // '' = all functions
+  const [range, setRange] = useState<YRange>('auto')
   // Deployed functions, plus any that only appear in recent calls (deleted since).
   const names = useMemo(
     () => [...new Set([...functions.map((f) => f.name), ...calls.map((c) => c.function)])].sort(),
@@ -42,16 +46,28 @@ export function LatencyChart({ calls, functions, now }: { calls: Call[]; functio
     () => calls.filter((c) => c.t >= now - win * 1000 && c.start && (!fn || c.function === fn)),
     [calls, now, win, fn],
   )
+  const maxMs = useMemo(() => recent.reduce((m, c) => Math.max(m, c.duration_ms), 0), [recent])
+  const top = yTop(range, maxMs)
   const series = useMemo(
     () =>
       KINDS.map((k) => ({
         ...k,
         points: recent
           .filter((c) => c.start === k.kind)
-          .map((c): Point => ({ x: (c.t - now) / 1000, y: Math.max(0.1, c.duration_ms), call: c })),
+          .map(
+            (c): Point => ({
+              x: (c.t - now) / 1000,
+              // Keep every dot inside the axis: a log scale has no zero, and a dot outside the
+              // range would simply not be drawn.
+              y: Math.min(top, Math.max(Y_BOTTOM, c.duration_ms)),
+              clipped: c.duration_ms > top,
+              call: c,
+            }),
+          ),
       })),
-    [recent, now],
+    [recent, now, top],
   )
+  const clipped = series.reduce((n, s) => n + s.points.filter((p) => p.clipped).length, 0)
   const summary = useMemo(() => summarize(recent, (c) => c.start ?? '', (c) => c.duration_ms), [recent])
   const coldVMReady = useMemo(() => {
     const cold = recent.filter((c) => c.start === 'restore' || c.start === 'boot')
@@ -77,6 +93,19 @@ export function LatencyChart({ calls, functions, now }: { calls: Call[]; functio
             </button>
           ))}
         </div>
+        <div className="seg" role="group" aria-label="Latency range (top of the y axis)">
+          {Y_RANGES.map((r) => (
+            <button
+              key={String(r.value)}
+              className={r.value === range ? 'on' : ''}
+              aria-pressed={r.value === range}
+              title={r.value === 'auto' ? 'Fit the slowest call shown' : `Show up to ${r.label}`}
+              onClick={() => setRange(r.value)}
+            >
+              {r.label}
+            </button>
+          ))}
+        </div>
       </div>
       <ul className="legend" aria-label="Start kinds">
         {KINDS.map((k) => (
@@ -92,7 +121,10 @@ export function LatencyChart({ calls, functions, now }: { calls: Call[]; functio
       </ul>
 
       <div className="chart-box">
-        <div className="axis-title muted">server time per call, ms (log scale)</div>
+        <div className="axis-title muted">
+          server time per call, ms (log scale, up to {fmtAxisMs(top)}
+          {range === 'auto' ? ', fits the slowest call' : ''})
+        </div>
         {recent.length === 0 ? (
           <p className="muted empty">
             No calls{fn ? ` of ${fn}` : ''} in the last {win} s. Invoke a function or run a load test.
@@ -114,10 +146,10 @@ export function LatencyChart({ calls, functions, now }: { calls: Call[]; functio
                 type="number"
                 dataKey="y"
                 scale="log"
-                domain={[0.5, 2000]}
+                domain={[Y_BOTTOM, top]}
                 allowDataOverflow
-                ticks={[1, 5, 10, 50, 100, 500, 1000]}
-                tickFormatter={(v: number) => (v >= 1000 ? `${v / 1000}s` : `${v}`)}
+                ticks={yTicks(top)}
+                tickFormatter={fmtAxisMs}
                 stroke="var(--axis)"
                 tick={{ fill: 'var(--muted)', fontSize: 12 }}
                 width={44}
@@ -138,6 +170,15 @@ export function LatencyChart({ calls, functions, now }: { calls: Call[]; functio
               ))}
             </ScatterChart>
           </ResponsiveContainer>
+        )}
+        {clipped > 0 && (
+          <p className="muted note" role="status">
+            {clipped} call{clipped === 1 ? '' : 's'} took longer than {fmtAxisMs(top)} and {clipped === 1 ? 'is' : 'are'} drawn on
+            the top edge.{' '}
+            <button className="link-btn" onClick={() => setRange('auto')}>
+              Fit all
+            </button>
+          </p>
         )}
       </div>
 
@@ -203,7 +244,10 @@ function Tip({ active, payload }: { active?: boolean; payload?: ReadonlyArray<{ 
         {c.function} · {c.start}
         {c.snapshot ? ` (${c.snapshot} snapshot)` : ''}
       </div>
-      <div className="num">server {fmtMs(c.duration_ms)}</div>
+      <div className="num">
+        server {fmtMs(c.duration_ms)}
+        {p.clipped ? ' (above the range)' : ''}
+      </div>
       {c.start !== 'warm' && <div className="num">VM ready {fmtMs(c.boot_ms)}</div>}
       {c.upload_ms > 0 && <div className="num">upload {fmtMs(c.upload_ms)}</div>}
       {c.load_ms > 0 && <div className="num">import {fmtMs(c.load_ms)}</div>}
